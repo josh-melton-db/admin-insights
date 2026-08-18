@@ -1,0 +1,11 @@
+examples
+test-results
+playwright-report
+.smoke-test
+node_modules
+.databricks
+.git
+.env
+client/dist
+dist
+build
