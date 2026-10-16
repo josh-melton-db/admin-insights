@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test';
 
 const adminIdentity = {
   actor: {
-    email: 'josh.melton@databricks.com',
-    displayName: 'Josh Melton',
+    email: 'admin@example.com',
+    displayName: 'Example Admin',
     roles: ['admin'],
     isAdmin: true,
     isRequester: true,

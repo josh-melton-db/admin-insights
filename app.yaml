@@ -5,10 +5,10 @@ env:
   - name: LAKEBASE_ENDPOINT
     valueFrom: postgres
   - name: ADMIN_INSIGHTS_BOOTSTRAP_ADMINS
-    value: 'josh.melton@databricks.com'
+    value: 'admin@example.com'
   - name: ADMIN_INSIGHTS_ADMIN_GROUPS
     value: 'admins'
   - name: ADMIN_INSIGHTS_EXECUTION_MODE
     value: 'dry_run'
   - name: ADMIN_INSIGHTS_DEV_USER
-    value: 'josh.melton@databricks.com'
+    value: 'admin@example.com'
