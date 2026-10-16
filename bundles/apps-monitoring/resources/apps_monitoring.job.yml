@@ -8,13 +8,15 @@ resources:
         timezone_id: UTC
 
       # Defaults come from bundle variables. Don't override these at run time:
-      # the dashboard's dataset catalog/schema are bound at deploy time, so a
-      # namespace change needs `bundle deploy --var catalog=... --var schema=...`.
+      # the dashboard's dataset catalog/schema and table prefix are bound at
+      # deploy time, so a change needs `bundle deploy --var ...`.
       parameters:
         - name: catalog
           default: ${var.catalog}
         - name: schema
           default: ${var.schema}
+        - name: name_prefix
+          default: ${var.name_prefix}
 
       environments:
         - environment_key: default
@@ -33,6 +35,8 @@ resources:
               - "{{job.parameters.catalog}}"
               - --schema
               - "{{job.parameters.schema}}"
+              - --name-prefix
+              - "{{job.parameters.name_prefix}}"
 
         - task_key: refresh_app_mvs
           depends_on:
@@ -49,6 +53,7 @@ resources:
             parameters:
               catalog: "{{job.parameters.catalog}}"
               schema: "{{job.parameters.schema}}"
+              name_prefix: "{{job.parameters.name_prefix}}"
 
         - task_key: refresh_dashboard
           depends_on:

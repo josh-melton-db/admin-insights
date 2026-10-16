@@ -22,9 +22,18 @@ variables:
   schema:
     description: Schema holding the Apps MVs and apps_inventory_snapshot.
     default: admin_insights
+  name_prefix:
+    description: >-
+      Prepended to every UC object this bundle creates or refreshes
+      (<prefix>apps_inventory_snapshot, <prefix>app_obo_activity_daily,
+      <prefix>app_config_events_daily). Must match ^[A-Za-z0-9_]*$. Empty
+      means the unprefixed names, which are the admin-insights app's shared MVs.
+    default: ""
 
 targets:
   default:
     default: true
+    variables:
+      name_prefix: monitor_
     workspace:
       host: https://fe-vm-vdm-classic-1rkyo7.cloud.databricks.com

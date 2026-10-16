@@ -19,10 +19,10 @@ live. Raw audit scans commonly take 30–120 seconds and abort AppKit SSE stream
 6. `06_app_activity_daily_mvs.sql` — rolling 90-day daily facts for Databricks
    Apps user-authorization (OBO) actions and createApp/updateApp `user_api_scopes`.
    App usage in the UI is OBO events plus Insights, not billing on/off.
-   These two MVs have no `SCHEDULE`. The `apps-monitoring` bundle job
-   (`bundles/apps-monitoring/`) is their single refresher: it creates them if
-   missing, drops any existing schedule, and refreshes them daily at 06:00 UTC.
-   Deploy that bundle after running this file, or the MVs will not refresh.
+   Both MVs refresh themselves with `SCHEDULE EVERY 1 DAY`. The
+   `apps-monitoring` bundle (`bundles/apps-monitoring/`) does not refresh them;
+   it maintains its own prefixed copies (`monitor_app_obo_activity_daily`,
+   `monitor_app_config_events_daily`) with the same SELECTs. Keep both in sync.
 7. `07_actor_activity_daily_mv.sql` — rolling 90-day daily actors from audit
    (email, run_as, run_by) by service. Overview user counts read this MV, not
    `system.query.history`.
