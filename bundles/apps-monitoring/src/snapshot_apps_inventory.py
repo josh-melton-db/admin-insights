@@ -3,7 +3,8 @@
 Writes <catalog>.<schema>.apps_inventory_snapshot (overwrite) with one row per
 app from WorkspaceClient().apps.list() / apps.get(), plus a creator-active check against
 SCIM users and service principals. Catalog and schema come from job
-parameters (--catalog / --schema), not config files.
+parameters (--catalog / --schema), not config files, and must match
+^[A-Za-z0-9_]+$.
 """
 
 import argparse
@@ -11,6 +12,7 @@ import re
 from datetime import datetime, timezone
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied, Unauthenticated
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     ArrayType,
@@ -22,6 +24,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 SCHEMA = StructType(
@@ -34,6 +37,7 @@ SCHEMA = StructType(
         StructField("creator", StringType(), True),
         StructField("creator_type", StringType(), True),
         StructField("creator_active", BooleanType(), True),
+        StructField("metadata_incomplete", BooleanType(), False),
         StructField("app_state", StringType(), True),
         StructField("app_status_message", StringType(), True),
         StructField("compute_state", StringType(), True),
@@ -94,7 +98,8 @@ def classify_creator(w, creator, cache):
     user: matches a SCIM userName (active flag from SCIM).
     sp: matches a service principal applicationId or displayName.
     Not found: email-shaped -> user, inactive (deleted); UUID-shaped -> sp,
-    inactive (deleted); otherwise unknown, inactive.
+    inactive (deleted); otherwise unknown with creator_active NULL, because a
+    failed lookup on an unrecognized name does not confirm the creator is gone.
     """
     if not creator:
         return "unknown", None
@@ -117,7 +122,7 @@ def classify_creator(w, creator, cache):
         elif UUID_RE.match(creator):
             result = ("sp", False)
         else:
-            result = ("unknown", False)
+            result = ("unknown", None)
     cache[creator] = result
     return result
 
@@ -127,6 +132,9 @@ def main():
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)
     args = parser.parse_args()
+    for value in (args.catalog, args.schema):
+        if not IDENTIFIER_RE.match(value):
+            raise ValueError(f"catalog and schema must match ^[A-Za-z0-9_]+$, got {value!r}")
 
     w = WorkspaceClient()
     workspace_id = str(w.get_workspace_id())
@@ -134,9 +142,27 @@ def main():
     creator_cache = {}
 
     rows = []
+    listed_count = 0
+    failed_gets = 0
     for listed in w.apps.list():
+        listed_count += 1
         # apps.list omits app_status and user_api_scopes; apps.get returns them.
-        app = w.apps.get(name=listed.name)
+        # Apps deleted between list and get are skipped. Other per-app errors
+        # keep the list row with metadata_incomplete = true and NULL scopes and
+        # status (unknown, not empty). Auth errors fail the run.
+        metadata_incomplete = False
+        try:
+            app = w.apps.get(name=listed.name)
+        except NotFound:
+            print(f"Skipping {listed.name}: deleted between apps.list and apps.get")
+            continue
+        except (Unauthenticated, PermissionDenied):
+            raise
+        except DatabricksError as e:
+            print(f"apps.get failed for {listed.name}; keeping list metadata only: {e}")
+            app = listed
+            metadata_incomplete = True
+            failed_gets += 1
         creator_type, creator_active = classify_creator(w, getattr(app, "creator", None), creator_cache)
         app_status = getattr(app, "app_status", None)
         compute_status = getattr(app, "compute_status", None)
@@ -152,8 +178,9 @@ def main():
                 getattr(app, "creator", None),
                 creator_type,
                 creator_active,
-                enum_value(getattr(app_status, "state", None)),
-                getattr(app_status, "message", None),
+                metadata_incomplete,
+                None if metadata_incomplete else enum_value(getattr(app_status, "state", None)),
+                None if metadata_incomplete else getattr(app_status, "message", None),
                 enum_value(getattr(compute_status, "state", None)),
                 getattr(compute_status, "message", None),
                 enum_value(getattr(app, "compute_size", None)),
@@ -172,12 +199,15 @@ def main():
                 getattr(app, "service_principal_client_id", None),
                 getattr(app, "oauth2_app_client_id", None),
                 getattr(app, "url", None),
-                list(getattr(app, "user_api_scopes", None) or []),
-                list(getattr(app, "effective_user_api_scopes", None) or []),
+                None if metadata_incomplete else list(getattr(app, "user_api_scopes", None) or []),
+                None if metadata_incomplete else list(getattr(app, "effective_user_api_scopes", None) or []),
                 getattr(app, "budget_policy_id", None),
                 getattr(app, "effective_budget_policy_id", None),
             )
         )
+
+    if failed_gets and failed_gets == listed_count:
+        raise RuntimeError(f"apps.get failed for all {listed_count} apps; treating as a workspace-wide error")
 
     table = f"`{args.catalog}`.`{args.schema}`.apps_inventory_snapshot"
     spark = SparkSession.builder.getOrCreate()
@@ -191,7 +221,10 @@ def main():
         f"COMMENT ON TABLE {table} IS 'Daily snapshot of Databricks Apps from the Apps API "
         "(apps.list) with a creator-active check. Overwritten by the apps-monitoring job.'"
     )
-    print(f"Wrote {len(rows)} apps to {table} at {snapshot_time.isoformat()}")
+    print(
+        f"Wrote {len(rows)} apps to {table} at {snapshot_time.isoformat()} "
+        f"({failed_gets} with incomplete metadata)"
+    )
 
 
 if __name__ == "__main__":

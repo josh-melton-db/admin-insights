@@ -8,6 +8,10 @@ bundle:
 include:
   - resources/*.yml
 
+sync:
+  exclude:
+    - tests/**
+
 variables:
   warehouse_id:
     description: Serverless SQL warehouse for the MV refresh task and dashboard.

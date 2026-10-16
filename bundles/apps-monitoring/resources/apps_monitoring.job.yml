@@ -7,6 +7,9 @@ resources:
         quartz_cron_expression: "0 0 6 * * ?"
         timezone_id: UTC
 
+      # Defaults come from bundle variables. Don't override these at run time:
+      # the dashboard's dataset catalog/schema are bound at deploy time, so a
+      # namespace change needs `bundle deploy --var catalog=... --var schema=...`.
       parameters:
         - name: catalog
           default: ${var.catalog}
@@ -34,6 +37,10 @@ resources:
         - task_key: refresh_app_mvs
           depends_on:
             - task_key: snapshot_apps_inventory
+          # Retry transient warehouse errors. Every step in the SQL file is idempotent.
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          retry_on_timeout: false
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:

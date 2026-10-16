@@ -16,8 +16,8 @@
         "  SELECT\n",
         "    s.app_name,\n",
         "    max(o.activity_date) AS last_obo_date,\n",
-        "    coalesce(sum(CASE WHEN o.activity_date >= date_sub(current_date(), :usage_days) THEN o.event_count END), 0) AS obo_events_window,\n",
-        "    count(DISTINCT CASE WHEN o.activity_date >= date_sub(current_date(), :usage_days) THEN o.user_email END) AS obo_users_window\n",
+        "    coalesce(sum(CASE WHEN o.activity_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN o.event_count END), 0) AS obo_events_window,\n",
+        "    count(DISTINCT CASE WHEN o.activity_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN o.user_email END) AS obo_users_window\n",
         "  FROM snap s\n",
         "  INNER JOIN app_obo_activity_daily o\n",
         "    ON o.workspace_id = s.workspace_id\n",
@@ -27,7 +27,7 @@
         "billed AS (\n",
         "  SELECT\n",
         "    u.usage_metadata.app_id AS app_id,\n",
-        "    coalesce(sum(CASE WHEN u.usage_date >= date_sub(current_date(), :usage_days) THEN u.usage_quantity END), 0) AS dbus_window,\n",
+        "    coalesce(sum(CASE WHEN u.usage_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN u.usage_quantity END), 0) AS dbus_window,\n",
         "    max(u.usage_date) AS last_billed_date\n",
         "  FROM system.billing.usage u\n",
         "  WHERE u.usage_date >= date_sub(current_date(), 90)\n",
@@ -42,6 +42,7 @@
         "    s.creator,\n",
         "    s.creator_type,\n",
         "    s.creator_active,\n",
+        "    s.metadata_incomplete,\n",
         "    c.creator_app_count,\n",
         "    s.app_state,\n",
         "    s.compute_state,\n",
@@ -63,13 +64,16 @@
         "    s.snapshot_time,\n",
         "    CASE WHEN coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_usage,\n",
         "    CASE WHEN coalesce(b.dbus_window, 0) > 0 AND coalesce(o.obo_users_window, 0) = 0 THEN 1 ELSE 0 END AS flag_billed_no_users,\n",
-        "    CASE WHEN size(s.user_api_scopes) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_sp_only,\n",
+        "    CASE WHEN s.user_api_scopes IS NOT NULL AND size(s.user_api_scopes) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_sp_only,\n",
+        "    CASE WHEN coalesce(size(s.user_api_scopes) > 0, false) THEN 1 ELSE 0 END AS has_user_scopes,\n",
+        "    CASE WHEN s.user_api_scopes IS NULL THEN 1 ELSE 0 END AS flag_scopes_unknown,\n",
         "    CASE WHEN s.compute_state IN ('STOPPED', 'ERROR') OR s.active_deployment_id IS NULL THEN 1 ELSE 0 END AS flag_stopped_or_never_deployed,\n",
         "    CASE WHEN greatest(\n",
         "        coalesce(s.active_deployment_update_time, s.active_deployment_create_time, s.create_time),\n",
         "        coalesce(s.update_time, s.create_time)\n",
         "      ) < date_sub(current_date(), :stale_days) THEN 1 ELSE 0 END AS flag_stale_deploy,\n",
-        "    CASE WHEN coalesce(s.creator_active, false) = false THEN 1 ELSE 0 END AS flag_creator_inactive,\n",
+        "    CASE WHEN s.creator_active = false THEN 1 ELSE 0 END AS flag_creator_inactive,\n",
+        "    CASE WHEN s.creator_active IS NULL THEN 1 ELSE 0 END AS flag_creator_unknown,\n",
         "    CASE WHEN c.creator_app_count > :creator_app_threshold THEN 1 ELSE 0 END AS flag_over_creator\n",
         "  FROM snap s\n",
         "  LEFT JOIN creator_counts c ON c.creator <=> s.creator\n",
@@ -85,16 +89,18 @@
         "    CASE WHEN flag_stopped_or_never_deployed = 1 THEN 'stopped_or_never_deployed' END,\n",
         "    CASE WHEN flag_stale_deploy = 1 THEN 'stale_deploy' END,\n",
         "    CASE WHEN flag_creator_inactive = 1 THEN 'creator_inactive' END,\n",
-        "    CASE WHEN flag_over_creator = 1 THEN 'over_creator' END\n",
+        "    CASE WHEN flag_over_creator = 1 THEN 'over_creator' END,\n",
+        "    CASE WHEN flag_creator_unknown = 1 THEN 'creator_unknown' END,\n",
+        "    CASE WHEN flag_scopes_unknown = 1 THEN 'scopes_unknown' END\n",
         "  ) AS reasons,\n",
         "  CASE\n",
         "    WHEN flag_no_usage = 1\n",
-        "      AND (flag_sp_only = 0 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
+        "      AND (has_user_scopes = 1 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
         "      THEN 1 ELSE 0\n",
         "  END AS is_deletion_candidate,\n",
         "  CASE\n",
         "    WHEN flag_no_usage = 1\n",
-        "      AND (flag_sp_only = 0 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
+        "      AND (has_user_scopes = 1 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
         "      THEN 'Deletion candidate' ELSE 'Keep'\n",
         "  END AS candidate_label,\n",
         "  CASE WHEN flag_billed_no_users = 1 THEN dbus_window ELSE 0 END AS wasted_dbus\n",
@@ -338,7 +344,7 @@
               "frame": {
                 "showTitle": true,
                 "title": "Apps with no usage",
-                "description": "No user OBO activity in the usage window",
+                "description": "No user OBO activity in the usage window (max 90 days)",
                 "showDescription": true
               }
             }
@@ -746,7 +752,7 @@
               "lines": [
                 "## Deletion candidates\n",
                 "\n",
-                "One row per app. A deletion candidate has no user OBO activity in the usage window AND either declares user_api_scopes (built for users) or shows abandonment (stopped / never deployed, stale deploy, inactive creator). Nothing is deleted automatically.\n"
+                "One row per app. A deletion candidate has no user OBO activity in the usage window AND either declares user_api_scopes (built for users) or shows abandonment (stopped / never deployed, stale deploy, confirmed-inactive creator). creator_unknown and scopes_unknown are shown but never count toward deletion. Nothing is deleted automatically.\n"
               ]
             }
           },
@@ -958,6 +964,10 @@
                     {
                       "name": "user_api_scopes",
                       "expression": "`user_api_scopes`"
+                    },
+                    {
+                      "name": "metadata_incomplete",
+                      "expression": "`metadata_incomplete`"
                     }
                   ],
                   "disaggregated": true
@@ -1020,6 +1030,10 @@
                   {
                     "fieldName": "user_api_scopes",
                     "displayName": "user_api_scopes"
+                  },
+                  {
+                    "fieldName": "metadata_incomplete",
+                    "displayName": "Metadata incomplete"
                   }
                 ]
               },
@@ -1256,7 +1270,7 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Usage window (days, default 30)"
+                "title": "Usage window (days, default 30, clamped to 1-90)"
               }
             }
           },
