@@ -8,14 +8,16 @@ answers "what can we safely delete?" It deploys:
      (`apps.list` + `apps.get`) and SCIM, then overwrites
      `${catalog}.${schema}.${name_prefix}apps_inventory_snapshot`.
   2. `refresh_app_mvs`: a SQL file task on the warehouse. It runs
-     `CREATE OR REPLACE` on the bundle's three Apps MVs
+     `CREATE OR REPLACE` on the bundle's four Apps MVs
      (`${name_prefix}app_obo_activity_daily`,
      `${name_prefix}app_config_events_daily`,
-     `${name_prefix}app_access_activity_daily`), which applies any definition
-     change and recomputes them, then drops any schedule.
+     `${name_prefix}app_access_activity_daily`,
+     `${name_prefix}app_billing_daily`), which applies any definition change
+     and recomputes them, then drops any schedule.
   3. `refresh_dashboard`: a dashboard task that refreshes the dashboard below.
 - **Dashboard `Databricks Apps monitoring`**: an AI/BI dashboard with the pages
-  Overview, Deletion candidates, Creators, and Filters.
+  Overview, Deletion candidates, Creators, and Filters. Every dataset reads
+  only the bundle's snapshot table and MVs, never `system.*` directly.
 
 The dashboard only flags candidates. Nothing in this bundle stops or deletes an
 app.
@@ -73,8 +75,11 @@ Prerequisites:
 - Serverless jobs and a serverless SQL warehouse.
 - The deployer is a workspace admin (the snapshot task lists every app and
   reads SCIM).
-- The deployer can `SELECT` on `system.access.audit` and
-  `system.billing.usage`.
+- The job owner (the deployer, unless you change `run_as`) can `SELECT` on
+  `system.access.audit` and `system.billing.usage`. Only the job reads system
+  tables, when it refreshes the MVs. Dashboard viewers need no system-table
+  access: `USE CATALOG`/`USE SCHEMA` and `SELECT` on the bundle's tables in
+  `catalog.schema` are enough.
 - An existing `catalog.schema`, on which the deployer has `USE CATALOG`,
   `USE SCHEMA`, `CREATE TABLE`, and `CREATE MATERIALIZED VIEW`.
 - PyPI is reachable from serverless jobs (the snapshot task installs
@@ -121,8 +126,8 @@ files. Both tasks fail fast on a catalog or schema that doesn't fully match
 
 Dashboard dataset SQL uses `${var.name_prefix}`-prefixed table names without a
 catalog or schema (for example `monitor_apps_inventory_snapshot`). The bundle's
-`dataset_catalog`/`dataset_schema` fill those in. Only `system.billing.usage`
-is fully qualified.
+`dataset_catalog`/`dataset_schema` fill those in. No dataset references a
+`system.*` table; a test enforces that.
 
 The dashboard JSON is inline in `resources/apps_monitoring.dashboard.yml`
 (`serialized_dashboard`) rather than in a `file_path` `.lvdash.json`. The CLI
@@ -133,10 +138,10 @@ edit the layout in the UI, export the dashboard JSON, replace each table name's
 
 ## Tables
 
-All four live in `${catalog}.${schema}` and carry `name_prefix` (with the
+All five live in `${catalog}.${schema}` and carry `name_prefix` (with the
 `default` target: `monitor_apps_inventory_snapshot`,
 `monitor_app_obo_activity_daily`, `monitor_app_config_events_daily`,
-`monitor_app_access_activity_daily`).
+`monitor_app_access_activity_daily`, `monitor_app_billing_daily`).
 
 - `${name_prefix}apps_inventory_snapshot` (overwritten daily): one row per app, with these
   fields:
@@ -194,6 +199,13 @@ All four live in `${catalog}.${schema}` and carry `name_prefix` (with the
     `mintOAuthToken`, `tokenLogin`, `workspaceExport`). The dashboard matches
     it to an app on the app's `service_principal_client_id`.
 
+- `${name_prefix}app_billing_daily` (bundle-only, 90-day window): `usage_date`,
+  `workspace_id`, `app_id`, `app_name` (both from `usage_metadata`), and `dbus`
+  (`sum(usage_quantity)`), for `system.billing.usage` rows with
+  `usage_metadata.app_id` set. The dashboard's billed-DBU columns and daily DBU
+  chart read it, and still apply their own window to `current_date()`, so the
+  numbers are as of the last job run.
+
   There is no Apps visit system table. The app Insights viewers and app
   `auth` telemetry are richer sources but are not system tables, so they are
   out of scope here.
@@ -211,7 +223,7 @@ refresher**:
   `SCHEDULE`. That applies definition changes to existing MVs (`IF NOT EXISTS`
   would silently keep an old definition) and recomputes them synchronously,
   even when the definition is unchanged. `system.access.audit` is not a Delta
-  source, so a refresh is always a full recompute anyway; a separate
+  source, so an audit MV refresh is always a full recompute anyway; a separate
   `REFRESH` would compute everything twice.
 - It then runs `ALTER MATERIALIZED VIEW … DROP SCHEDULE`, in case someone added
   a schedule outside the bundle. This is made idempotent by swallowing only
@@ -298,7 +310,7 @@ informational; they show up in `reasons` but never add or remove candidacy.
 |------|-----------|
 | `no_usage` | No human login, no human OBO, and no SP activity in the last `usage_days` (`activity_type = 'Idle'` with no login). This is the deletion-candidate rule. |
 | `no_human_usage` | No human login and no human OBO in the last `usage_days`. Informational: an `SP-only` app can be `no_human_usage` and still be used. Shown in `reasons` only when the app is not `no_usage`. |
-| `billed_no_users` | DBUs in `system.billing.usage` (`usage_metadata.app_id`) in the last `usage_days`, with zero human login users and zero human OBO users. Informational. |
+| `billed_no_users` | DBUs (`system.billing.usage` via `${name_prefix}app_billing_daily`) in the last `usage_days`, with zero human login users and zero human OBO users. Informational. |
 | `sp_only` | `user_api_scopes` is known and empty (from the Apps API snapshot), and there are no human OBO events in the window: the app authorizes only as its service principal. Informational. NULL scopes (`metadata_incomplete`) are `scopes_unknown`, not `sp_only`. |
 | `stopped_or_never_deployed` | Compute state `STOPPED`/`ERROR`, or no active deployment. Informational. |
 | `stale_deploy` | The latest of active-deployment time and app `update_time` is more than `stale_days` ago. Informational. |

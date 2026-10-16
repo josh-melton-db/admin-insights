@@ -1,14 +1,17 @@
 -- Create-or-replace and unschedule this bundle's Databricks Apps materialized
 -- views, <name_prefix>app_obo_activity_daily, <name_prefix>app_config_events_daily,
--- and <name_prefix>app_access_activity_daily. The apps-monitoring job is the
--- single refresher of these MVs, so none carries a SCHEDULE. The first two
--- SELECTs match sql/governance/06_app_activity_daily_mvs.sql (rolling 90-day
--- window, same columns); app_access_activity_daily is bundle-only. With a
+-- <name_prefix>app_access_activity_daily, and <name_prefix>app_billing_daily.
+-- The apps-monitoring job is the single refresher of these MVs, so none
+-- carries a SCHEDULE. The first two SELECTs match
+-- sql/governance/06_app_activity_daily_mvs.sql (rolling 90-day window, same
+-- columns); app_access_activity_daily and app_billing_daily are bundle-only.
+-- The dashboard reads only these MVs and the snapshot, never system tables, so
+-- only the job owner needs SELECT on system.access and system.billing. With a
 -- non-empty prefix this file never touches the unprefixed MVs that the
 -- admin-insights app reads; those refresh themselves with SCHEDULE EVERY 1 DAY.
 -- CREATE OR REPLACE applies definition changes to existing MVs and recomputes
 -- them synchronously (system.access.audit is not a Delta source, so every
--- refresh is a full recompute anyway), so there is no separate REFRESH.
+-- audit MV refresh is a full recompute anyway), so there is no separate REFRESH.
 -- :catalog, :schema, and :name_prefix come from the job parameters.
 -- CREATE/ALTER MATERIALIZED VIEW do not accept IDENTIFIER(), so names are
 -- built as strings and run with EXECUTE IMMEDIATE. All three parameters are
@@ -21,6 +24,7 @@ BEGIN
   DECLARE obo_mv STRING;
   DECLARE config_mv STRING;
   DECLARE access_mv STRING;
+  DECLARE billing_mv STRING;
 
   IF :catalog IS NULL OR :catalog = '' OR regexp_replace(:catalog, '[A-Za-z0-9_]', '') <> ''
     OR :schema IS NULL OR :schema = '' OR regexp_replace(:schema, '[A-Za-z0-9_]', '') <> '' THEN
@@ -33,6 +37,7 @@ BEGIN
   SET obo_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_obo_activity_daily';
   SET config_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_config_events_daily';
   SET access_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_access_activity_daily';
+  SET billing_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_billing_daily';
 
   -- 1. Create or replace (also recomputes an existing MV).
   EXECUTE IMMEDIATE 'CREATE OR REPLACE MATERIALIZED VIEW ' || obo_mv || "
@@ -123,6 +128,20 @@ GROUP BY
     ELSE 'sp_activity'
   END";
 
+  EXECUTE IMMEDIATE 'CREATE OR REPLACE MATERIALIZED VIEW ' || billing_mv || "
+COMMENT 'Databricks Apps DBUs from the last 90 days of system.billing.usage, refreshed daily by the apps-monitoring job. Grain: usage date, workspace, app_id, app_name (usage_metadata). Only rows with usage_metadata.app_id set.'
+AS
+SELECT
+  usage_date,
+  workspace_id,
+  usage_metadata.app_id AS app_id,
+  usage_metadata.app_name AS app_name,
+  sum(usage_quantity) AS dbus
+FROM system.billing.usage
+WHERE usage_date >= date_sub(current_date(), 90)
+  AND usage_metadata.app_id IS NOT NULL
+GROUP BY usage_date, workspace_id, usage_metadata.app_id, usage_metadata.app_name";
+
   -- 2. Drop any SCHEDULE someone added outside the bundle. DROP SCHEDULE fails with
   --    DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST when there is none (its SQLSTATE
   --    is the generic 42000), so the handler matches that condition identifier
@@ -155,5 +174,15 @@ GROUP BY
       IF cond IS DISTINCT FROM 'DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST' THEN RESIGNAL; END IF;
     END;
     EXECUTE IMMEDIATE 'ALTER MATERIALIZED VIEW ' || access_mv || ' DROP SCHEDULE';
+  END;
+
+  BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+      DECLARE cond STRING;
+      GET DIAGNOSTICS CONDITION 1 cond = CONDITION_IDENTIFIER;
+      IF cond IS DISTINCT FROM 'DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST' THEN RESIGNAL; END IF;
+    END;
+    EXECUTE IMMEDIATE 'ALTER MATERIALIZED VIEW ' || billing_mv || ' DROP SCHEDULE';
   END;
 END
