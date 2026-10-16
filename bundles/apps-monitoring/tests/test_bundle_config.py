@@ -58,6 +58,47 @@ def test_refresh_sql_builds_prefixed_names_and_validates_prefix():
     assert "DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST" in sql
 
 
+def test_refresh_sql_rejects_null_parameters():
+    # A NULL marker makes "regexp_replace(...) <> ''" NULL, not TRUE, so each
+    # parameter needs an explicit IS NULL guard ahead of any statement.
+    sql = sql_code(BUNDLE / "src/refresh_app_mvs.sql")
+    first_set = sql.index("SET obo_mv")
+    for param in (":catalog", ":schema", ":name_prefix"):
+        guard = sql.find(f"{param} IS NULL")
+        assert 0 <= guard < first_set, f"missing IS NULL guard for {param}"
+
+
+def test_every_mv_statement_targets_a_validated_name():
+    sql = sql_code(BUNDLE / "src/refresh_app_mvs.sql")
+    last_guard = sql.rindex("SIGNAL SQLSTATE")
+    # Names are assigned exactly once, after all validation.
+    sets = re.findall(r"^\s*SET (\w+) = (.*);", sql, re.M)
+    assert [name for name, _ in sets] == ["obo_mv", "config_mv"]
+    for name, _ in sets:
+        assert sql.index(f"SET {name} =") > last_guard
+    # No statement names an MV literally; every one runs on obo_mv/config_mv.
+    assert not re.search(r"^\s*(CREATE|ALTER|REFRESH|DROP)\b", sql, re.M | re.I)
+    targets = re.findall(r"EXECUTE IMMEDIATE '([A-Z ]+?) ' \|\| (\w+)", sql)
+    assert sorted(targets) == sorted([
+        ("CREATE MATERIALIZED VIEW IF NOT EXISTS", "obo_mv"),
+        ("CREATE MATERIALIZED VIEW IF NOT EXISTS", "config_mv"),
+        ("ALTER MATERIALIZED VIEW", "obo_mv"),
+        ("ALTER MATERIALIZED VIEW", "config_mv"),
+        ("REFRESH MATERIALIZED VIEW", "obo_mv"),
+        ("REFRESH MATERIALIZED VIEW", "config_mv"),
+    ])
+    assert sql.count("EXECUTE IMMEDIATE") == len(targets)
+
+
+def test_no_workspace_identifiers_committed():
+    cfg = load("databricks.yml")
+    assert "default" not in cfg["variables"]["warehouse_id"]
+    assert "workspace" not in cfg["targets"]["default"]
+    example = json.loads((BUNDLE / "variable-overrides.example.json").read_text())
+    assert set(example) == {"warehouse_id"}
+    assert example["warehouse_id"].startswith("<")
+
+
 def _select_bodies(sql):
     return [re.sub(r"\s+", " ", b).strip() for b in re.findall(r"\nAS\n(SELECT.*?)(?:;|\"\;)", sql, re.S)]
 

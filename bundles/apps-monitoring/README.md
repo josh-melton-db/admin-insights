@@ -24,16 +24,29 @@ app.
 
 ## Deploy and run
 
+No workspace host or warehouse ID is committed. The CLI takes the workspace
+from `--profile`, and `warehouse_id` (a required variable) from a local,
+gitignored overrides file:
+
 ```bash
 cd bundles/apps-monitoring
-databricks bundle validate --profile DEFAULT
-databricks bundle deploy --profile DEFAULT
-databricks bundle run apps_monitoring --profile DEFAULT
-databricks bundle summary --profile DEFAULT   # job + dashboard URLs
+mkdir -p .databricks/bundle/default
+cp variable-overrides.example.json .databricks/bundle/default/variable-overrides.json
+# edit it: replace <sql-warehouse-id> with your serverless SQL warehouse ID
+```
+
+`.databricks/` is gitignored, so the real ID stays local. You can also pass
+`--var warehouse_id=<id>` on each command. Then:
+
+```bash
+databricks bundle validate --profile <profile>
+databricks bundle deploy --profile <profile>
+databricks bundle run apps_monitoring --profile <profile>
+databricks bundle summary --profile <profile>   # job + dashboard URLs
 ```
 
 To change the namespace or prefix, override the variables **at deploy time**:
-`databricks bundle deploy --profile DEFAULT --var catalog=main --var schema=ops --var name_prefix=ops_`.
+`databricks bundle deploy --profile <profile> --var catalog=main --var schema=ops --var name_prefix=ops_`.
 Do not override the `catalog`/`schema`/`name_prefix` job parameters at run
 time (`bundle run --params` or "Run now with different parameters"). The job
 would then write and refresh one set of tables while the dashboard, whose
@@ -44,7 +57,7 @@ Unit tests (they mock the Apps API and Spark, and statically check that every
 table reference in the job, SQL, and dashboard carries the prefix):
 `python3 -m pytest -q tests/`.
 
-To remove everything: `databricks bundle destroy --profile DEFAULT`. This
+To remove everything: `databricks bundle destroy --profile <profile>`. This
 removes the job and the dashboard. It leaves the prefixed MVs and snapshot
 table in place, and those MVs then have no refresher. Drop them manually if
 you no longer need them.
@@ -53,7 +66,7 @@ you no longer need them.
 
 | Variable | Default | Used by |
 |----------|---------|---------|
-| `warehouse_id` | `2fe54b32b36329be` | `refresh_app_mvs` SQL task, dashboard warehouse, `refresh_dashboard` task |
+| `warehouse_id` | none (required; set in `variable-overrides.json`) | `refresh_app_mvs` SQL task, dashboard warehouse, `refresh_dashboard` task |
 | `catalog` | `demos` | job parameter `catalog`, dashboard `dataset_catalog` |
 | `schema` | `admin_insights` | job parameter `schema`, dashboard `dataset_schema` |
 | `name_prefix` | `""` (the `default` target sets `monitor_`) | job parameter `name_prefix`, every table name in the job and dashboard |
@@ -166,7 +179,7 @@ The thresholds are dashboard parameters on the **Filters** page:
 That is inclusive, so it covers N full days plus today (UTC). `stale_days`
 compares the last deploy/update timestamp against `current_date() - stale_days`.
 
-"OBO" means user on-behalf-of activity in `app_obo_activity_daily`. An OBO row
+"OBO" means user on-behalf-of activity in `${name_prefix}app_obo_activity_daily`. An OBO row
 is matched to an app when the last path segment of `acting_resource` equals the
 app's `oauth2_app_client_id`, `id`, or `name`. Audit records `acting_resource`
 as `accounts/<acct>/oauth2/custom-app-integrations/<oauth2_app_client_id>`.

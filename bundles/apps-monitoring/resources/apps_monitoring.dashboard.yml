@@ -3,7 +3,8 @@ resources:
     apps_monitoring_dashboard:
       display_name: Databricks Apps monitoring
       warehouse_id: ${var.warehouse_id}
-      # Dataset SQL uses bare table names; these fill in catalog/schema.
+      # Dataset SQL uses ${var.name_prefix}-prefixed table names without a
+      # catalog or schema; these fill in catalog/schema.
       dataset_catalog: ${var.catalog}
       dataset_schema: ${var.schema}
       # The dashboard JSON is inline (not file_path) so the bundle substitutes

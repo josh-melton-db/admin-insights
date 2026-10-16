@@ -11,16 +11,17 @@
 -- validated first, so they cannot inject SQL: catalog and schema must match
 -- ^[A-Za-z0-9_]+$, the prefix ^[A-Za-z0-9_]*$ (empty allowed). The check
 -- strips allowed characters and requires nothing left, because RLIKE's $ also
--- matches before a trailing newline.
+-- matches before a trailing newline. NULL is rejected explicitly, because a
+-- NULL marker makes the character check NULL rather than TRUE.
 BEGIN
   DECLARE obo_mv STRING;
   DECLARE config_mv STRING;
 
-  IF :catalog = '' OR regexp_replace(:catalog, '[A-Za-z0-9_]', '') <> ''
-    OR :schema = '' OR regexp_replace(:schema, '[A-Za-z0-9_]', '') <> '' THEN
+  IF :catalog IS NULL OR :catalog = '' OR regexp_replace(:catalog, '[A-Za-z0-9_]', '') <> ''
+    OR :schema IS NULL OR :schema = '' OR regexp_replace(:schema, '[A-Za-z0-9_]', '') <> '' THEN
     SIGNAL SQLSTATE '22023' SET MESSAGE_TEXT = 'catalog and schema job parameters must match ^[A-Za-z0-9_]+$';
   END IF;
-  IF regexp_replace(:name_prefix, '[A-Za-z0-9_]', '') <> '' THEN
+  IF :name_prefix IS NULL OR regexp_replace(:name_prefix, '[A-Za-z0-9_]', '') <> '' THEN
     SIGNAL SQLSTATE '22023' SET MESSAGE_TEXT = 'name_prefix job parameter must match ^[A-Za-z0-9_]*$';
   END IF;
 

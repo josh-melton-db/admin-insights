@@ -2,6 +2,9 @@
 # Apps MV refresh job and an AI/BI dashboard of deletion candidates.
 # Deploy from this directory only. The repo-root databricks.yml deploys the
 # live admin-insights app and is unrelated to this bundle.
+# The workspace comes from --profile, and warehouse_id from
+# .databricks/bundle/default/variable-overrides.json (see
+# variable-overrides.example.json and README.md). Neither is committed.
 bundle:
   name: apps-monitoring
 
@@ -14,13 +17,19 @@ sync:
 
 variables:
   warehouse_id:
-    description: Serverless SQL warehouse for the MV refresh task and dashboard.
-    default: 2fe54b32b36329be
+    description: >-
+      Serverless SQL warehouse ID for the MV refresh task and dashboard.
+      Required; set it in .databricks/bundle/default/variable-overrides.json
+      or with --var warehouse_id=<id>.
   catalog:
-    description: Catalog holding the Apps MVs and apps_inventory_snapshot.
+    description: >-
+      Catalog holding this bundle's <name_prefix>-prefixed Apps MVs and
+      <name_prefix>apps_inventory_snapshot.
     default: demos
   schema:
-    description: Schema holding the Apps MVs and apps_inventory_snapshot.
+    description: >-
+      Schema holding this bundle's <name_prefix>-prefixed Apps MVs and
+      <name_prefix>apps_inventory_snapshot.
     default: admin_insights
   name_prefix:
     description: >-
@@ -35,5 +44,3 @@ targets:
     default: true
     variables:
       name_prefix: monitor_
-    workspace:
-      host: https://fe-vm-vdm-classic-1rkyo7.cloud.databricks.com
