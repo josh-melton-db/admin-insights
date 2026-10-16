@@ -64,6 +64,39 @@ removes the job and the dashboard. It leaves the prefixed MVs and snapshot
 table in place, and those MVs then have no refresher. Drop them manually if
 you no longer need them.
 
+## Deploy to a new workspace
+
+Prerequisites:
+
+- Unity Catalog, with the `system.access` and `system.billing` system schemas
+  enabled.
+- Serverless jobs and a serverless SQL warehouse.
+- The deployer is a workspace admin (the snapshot task lists every app and
+  reads SCIM).
+- The deployer can `SELECT` on `system.access.audit` and
+  `system.billing.usage`.
+- An existing `catalog.schema`, on which the deployer has `USE CATALOG`,
+  `USE SCHEMA`, `CREATE TABLE`, and `CREATE MATERIALIZED VIEW`.
+- PyPI is reachable from serverless jobs (the snapshot task installs
+  `databricks-sdk`).
+
+Steps, from `bundles/apps-monitoring/`:
+
+1. Authenticate a CLI profile for the workspace:
+   `databricks auth login --host <workspace-url> --profile <profile>`.
+2. Create `.databricks/bundle/default/variable-overrides.json` (gitignored)
+   with your warehouse and namespace:
+   ```json
+   {"warehouse_id": "<sql-warehouse-id>", "catalog": "<catalog>", "schema": "<schema>"}
+   ```
+   `catalog` and `schema` are accepted there; `databricks bundle validate -o
+   json --profile <profile>` shows them under `variables` and in the job
+   parameters.
+3. `databricks bundle validate --strict --profile <profile>`, then
+   `databricks bundle deploy --profile <profile>`.
+4. Run the job once so the snapshot, MVs, and dashboard exist before the
+   first daily run: `databricks bundle run apps_monitoring --profile <profile>`.
+
 ## Variables
 
 | Variable | Default | Used by |
@@ -212,8 +245,18 @@ The thresholds are dashboard parameters on the **Filters** page:
 That is inclusive, so it covers N full days plus today (UTC). `stale_days`
 compares the last deploy/update timestamp against `current_date() - stale_days`.
 
-**Usage** is a human using the app. Two signals count, both from system tables
-and both in the last `usage_days`:
+**Domain model.** Users sign in to an app with OAuth (the `login` signal).
+After that, the app acts in one of two ways:
+
+- **SP-only**: the app acts with its own service principal's permissions. Its
+  SP activity is the app doing work, often on behalf of a user's request. It
+  is interaction with the app, just not attributable to a person.
+- **OBO** (on behalf of): the app acts with the signed-in user's permissions.
+  Audit records the human as the identity and the app's OAuth integration as
+  `acting_resource`.
+
+Three signals count as usage, all from system tables and all in the last
+`usage_days`:
 
 - **Human login** (`human_login_users`, `last_login_date`, `has_human_login`):
   `signal = 'login'` rows in `${name_prefix}app_access_activity_daily` whose
@@ -224,62 +267,55 @@ and both in the last `usage_days`:
   `accounts/<acct>/oauth2/custom-app-integrations/<oauth2_app_client_id>`.
   Matching is on the client ID only (it is account-unique). There is no
   workspace match, because most OBO rows have `workspace_id = 0`.
+- **SP activity** (`sp_events_window`, `last_sp_activity_date`): `signal =
+  'sp_activity'` rows whose `user_email` is the app's
+  `service_principal_client_id`. This is the app doing work with its own
+  permissions, possibly driven by users.
 
-Both exclude the app's own service principal: a row counts only if
-`user_email` is email-shaped and is not the app's `service_principal_client_id`.
-The app SP does show up with an `acting_resource` sometimes (for example on
-`workspaceExport`).
+Human login and human OBO exclude the app's own service principal: a row
+counts only if `user_email` is email-shaped and is not the app's
+`service_principal_client_id`. The app SP does show up with an
+`acting_resource` sometimes (for example on `workspaceExport`); that is SP
+activity, not human OBO. Billing is never usage.
 
-**SP activity** (`sp_events_window`, `last_sp_activity_date`): `signal =
-'sp_activity'` rows whose `user_email` is the app's
-`service_principal_client_id`. It is background or operational work, not
-usage.
+**`activity_type`** says how the app acts in the usage window. Human login is
+a separate column, so an `Idle` app can still have logins.
 
-**`activity_type`** describes how the app is active in the usage window. Human
-login is a separate dimension and is not part of it.
+| `activity_type` | Human login | Human OBO | SP activity | Deletion candidate |
+|-----------------|-------------|-----------|-------------|--------------------|
+| `SP-only` | any | no | yes | never |
+| `OBO` | any | yes | no | never |
+| `SP and OBO` | any | yes | yes | never |
+| `Idle` | yes | no | no | no (logins are usage) |
+| `Idle` | no | no | no | **yes** (`no_usage`) |
 
-| `activity_type` | Meaning |
-|-----------------|---------|
-| `SP-only` | SP activity, no human OBO |
-| `OBO` | Human OBO, no SP activity |
-| `SP and OBO` | Both |
-| `Idle` | Neither |
+An app is a **deletion candidate** only when it is `no_usage`: no human login,
+no human OBO, and no SP activity in the last `usage_days`. Nothing else makes
+an app a candidate, and any SP activity keeps it. The other flags are
+informational; they show up in `reasons` but never add or remove candidacy.
 
 | Flag | Definition |
 |------|-----------|
-| `no_usage` | No human login AND no human OBO in the last `usage_days`. Billing and SP activity are not usage, so an `SP-only` app with logins is not `no_usage`. |
-| `billed_no_users` | DBUs in `system.billing.usage` (`usage_metadata.app_id`) in the last `usage_days`, with zero human login users and zero human OBO users. |
-| `sp_only` | `user_api_scopes` is known and empty (from the Apps API snapshot), and there are no human OBO events in the window. The app authorizes only as its service principal. NULL scopes (`metadata_incomplete`) are `scopes_unknown`, not `sp_only`. |
-| `idle` | `no_usage` and `activity_type = 'Idle'`: no human login, no human OBO, and no SP activity. |
-| `stopped_or_never_deployed` | Compute state `STOPPED`/`ERROR`, or no active deployment. |
-| `stale_deploy` | The latest of active-deployment time and app `update_time` is more than `stale_days` ago. |
-| `creator_inactive` | `creator_active = false`: the creator is a confirmed missing or deactivated user or SP. |
-| `creator_unknown` | `creator_active` is NULL (the creator couldn't be classified). Shown in reasons; never a delete signal. |
-| `scopes_unknown` | `user_api_scopes` is NULL because of `metadata_incomplete`. Shown in reasons; never a delete signal. |
-| `over_creator` | The creator owns more than `creator_app_threshold` existing apps. |
+| `no_usage` | No human login, no human OBO, and no SP activity in the last `usage_days` (`activity_type = 'Idle'` with no login). This is the deletion-candidate rule. |
+| `no_human_usage` | No human login and no human OBO in the last `usage_days`. Informational: an `SP-only` app can be `no_human_usage` and still be used. Shown in `reasons` only when the app is not `no_usage`. |
+| `billed_no_users` | DBUs in `system.billing.usage` (`usage_metadata.app_id`) in the last `usage_days`, with zero human login users and zero human OBO users. Informational. |
+| `sp_only` | `user_api_scopes` is known and empty (from the Apps API snapshot), and there are no human OBO events in the window: the app authorizes only as its service principal. Informational. NULL scopes (`metadata_incomplete`) are `scopes_unknown`, not `sp_only`. |
+| `stopped_or_never_deployed` | Compute state `STOPPED`/`ERROR`, or no active deployment. Informational. |
+| `stale_deploy` | The latest of active-deployment time and app `update_time` is more than `stale_days` ago. Informational. |
+| `creator_inactive` | `creator_active = false`: the creator is a confirmed missing or deactivated user or SP. Informational. |
+| `creator_unknown` | `creator_active` is NULL (the creator couldn't be classified). Informational. |
+| `scopes_unknown` | `user_api_scopes` is NULL because of `metadata_incomplete`. Informational. |
+| `over_creator` | The creator owns more than `creator_app_threshold` existing apps. Informational. |
 
-An app is a **deletion candidate** when it is `no_usage` AND at least one of
-these holds:
-
-- It declares `user_api_scopes`, meaning it was built for users and no one used it.
-- It is `Idle`: its service principal did nothing either.
-- It is `stopped_or_never_deployed`.
-- It is `stale_deploy`.
-- It is `creator_inactive`.
-
-Being `sp_only` (no user scopes) no longer protects an app on its own. Usage
-now includes human logins, which apps without user scopes do produce. An
-`sp_only` or scopes-unknown app with no usage is still a candidate only with a
-corroborating signal: `Idle`, stopped/never deployed, stale, or inactive
-creator.
-
-**Wasted DBUs** = DBUs in the window for `billed_no_users` apps.
+**Wasted DBUs** = DBUs in the window for deletion candidates (`no_usage`
+apps).
 
 ## Dashboard
 
 - **Overview**:
-  - KPIs: total apps, apps with no usage, deletion candidates, creators over
-    the threshold, wasted DBUs, stopped/never deployed.
+  - KPIs: total apps, apps with no human usage (`no_human_usage`), deletion
+    candidates, creators over the threshold, wasted DBUs, stopped/never
+    deployed.
   - Daily DBUs by app over 90 days (top 7 apps plus Other).
   - Daily human OBO users and events.
 - **Deletion candidates**: one row per app, with these columns:

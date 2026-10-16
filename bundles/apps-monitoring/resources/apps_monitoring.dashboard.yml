@@ -111,7 +111,8 @@ resources:
                 "    b.last_billed_date,\n",
                 "    s.url,\n",
                 "    s.snapshot_time,\n",
-                "    CASE WHEN coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_usage,\n",
+                "    CASE WHEN coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_events_window, 0) = 0 AND coalesce(p.sp_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_usage,\n",
+                "    CASE WHEN coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_human_usage,\n",
                 "    CASE WHEN coalesce(b.dbus_window, 0) > 0 AND coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_users_window, 0) = 0 THEN 1 ELSE 0 END AS flag_billed_no_users,\n",
                 "    CASE WHEN s.user_api_scopes IS NOT NULL AND size(s.user_api_scopes) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_sp_only,\n",
                 "    CASE WHEN coalesce(size(s.user_api_scopes) > 0, false) THEN 1 ELSE 0 END AS has_user_scopes,\n",
@@ -134,10 +135,9 @@ resources:
                 "SELECT\n",
                 "  *,\n",
                 "  concat_ws(', ',\n",
-                "    CASE WHEN flag_no_usage = 1 THEN 'no_usage' END,\n",
+                "    CASE WHEN flag_no_usage = 1 THEN 'no_usage' WHEN flag_no_human_usage = 1 THEN 'no_human_usage' END,\n",
                 "    CASE WHEN flag_billed_no_users = 1 THEN 'billed_no_users' END,\n",
                 "    CASE WHEN flag_sp_only = 1 THEN 'sp_only' END,\n",
-                "    CASE WHEN flag_no_usage = 1 AND activity_type = 'Idle' THEN 'idle' END,\n",
                 "    CASE WHEN flag_stopped_or_never_deployed = 1 THEN 'stopped_or_never_deployed' END,\n",
                 "    CASE WHEN flag_stale_deploy = 1 THEN 'stale_deploy' END,\n",
                 "    CASE WHEN flag_creator_inactive = 1 THEN 'creator_inactive' END,\n",
@@ -147,15 +147,13 @@ resources:
                 "  ) AS reasons,\n",
                 "  CASE\n",
                 "    WHEN flag_no_usage = 1\n",
-                "      AND (has_user_scopes = 1 OR activity_type = 'Idle' OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
                 "      THEN 1 ELSE 0\n",
                 "  END AS is_deletion_candidate,\n",
                 "  CASE\n",
                 "    WHEN flag_no_usage = 1\n",
-                "      AND (has_user_scopes = 1 OR activity_type = 'Idle' OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
                 "      THEN 'Deletion candidate' ELSE 'Keep'\n",
                 "  END AS candidate_label,\n",
-                "  CASE WHEN flag_billed_no_users = 1 THEN dbus_window ELSE 0 END AS wasted_dbus\n",
+                "  CASE WHEN flag_no_usage = 1 THEN dbus_window ELSE 0 END AS wasted_dbus\n",
                 "FROM facts\n",
                 "ORDER BY is_deletion_candidate DESC, dbus_window DESC, app_name\n"
               ],
@@ -314,7 +312,7 @@ resources:
                       "lines": [
                         "# Databricks Apps monitoring\n",
                         "\n",
-                        "What can we safely delete? Usage = a human signing in to the app or human on-behalf-of (OBO) activity, not billing and not the app's own service principal. activity_type says how the app is active (SP-only, OBO, SP and OBO, Idle). Thresholds are set on the Filters page. Refreshed daily at 06:00 UTC by the apps-monitoring job.\n"
+                        "What can we safely delete? An app is used if, in the usage window, a human signed in to it, it acted on behalf of a human (OBO), or its own service principal (SP) did work. SP activity is the app working with its own permissions, often for user requests; it is usage, just not attributable to a person. Billing alone is not usage. activity_type says how the app acts (SP-only, OBO, SP and OBO, Idle). Thresholds are set on the Filters page. Refreshed daily at 06:00 UTC by the apps-monitoring job.\n"
                       ]
                     }
                   },
@@ -377,8 +375,8 @@ resources:
                           "datasetName": "ds_apps",
                           "fields": [
                             {
-                              "name": "sum(flag_no_usage)",
-                              "expression": "SUM(`flag_no_usage`)"
+                              "name": "sum(flag_no_human_usage)",
+                              "expression": "SUM(`flag_no_human_usage`)"
                             }
                           ],
                           "disaggregated": false
@@ -390,14 +388,14 @@ resources:
                       "widgetType": "counter",
                       "encodings": {
                         "value": {
-                          "fieldName": "sum(flag_no_usage)",
-                          "displayName": "Apps with no usage"
+                          "fieldName": "sum(flag_no_human_usage)",
+                          "displayName": "Apps with no human usage"
                         }
                       },
                       "frame": {
                         "showTitle": true,
-                        "title": "Apps with no usage",
-                        "description": "No human sign-in and no human OBO activity in the usage window (max 90 days)",
+                        "title": "Apps with no human usage",
+                        "description": "No human sign-in and no human OBO in the usage window (max 90 days); may still have SP activity",
                         "showDescription": true
                       }
                     }
@@ -439,7 +437,7 @@ resources:
                       "frame": {
                         "showTitle": true,
                         "title": "Deletion candidates",
-                        "description": "No usage, plus user-facing scopes, Idle activity, or a sign of abandonment",
+                        "description": "No human sign-in, no human OBO, and no SP activity in the usage window",
                         "showDescription": true
                       }
                     }
@@ -531,7 +529,7 @@ resources:
                       "frame": {
                         "showTitle": true,
                         "title": "Wasted DBUs (usage window)",
-                        "description": "DBUs billed to apps with no human sign-ins and no human OBO users",
+                        "description": "DBUs billed to deletion candidates (no sign-in, no OBO, no SP activity)",
                         "showDescription": true
                       }
                     }
@@ -805,7 +803,7 @@ resources:
                       "lines": [
                         "## Deletion candidates\n",
                         "\n",
-                        "One row per app. A deletion candidate has no usage in the usage window (no human sign-in and no human OBO activity) AND either declares user_api_scopes (built for users), is Idle (no app service principal activity either), or shows abandonment (stopped / never deployed, stale deploy, confirmed-inactive creator). creator_unknown and scopes_unknown are shown but never count toward deletion. Nothing is deleted automatically.\n"
+                        "One row per app. A deletion candidate has no usage of any kind in the usage window: no human sign-in, no human OBO activity, and no activity by the app's service principal. Any SP activity keeps an app. The other reasons (no_human_usage, billed_no_users, sp_only, stopped_or_never_deployed, stale_deploy, creator_inactive, over_creator, creator_unknown, scopes_unknown) are informational and never make an app a candidate. Nothing is deleted automatically.\n"
                       ]
                     }
                   },
