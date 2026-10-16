@@ -7,7 +7,8 @@ import yaml
 
 BUNDLE = Path(__file__).resolve().parents[1]
 REPO = BUNDLE.parents[1]
-TABLES = ("apps_inventory_snapshot", "app_obo_activity_daily", "app_config_events_daily", "app_access_activity_daily")
+TABLES = ("apps_inventory_snapshot", "app_obo_activity_daily", "app_config_events_daily", "app_access_activity_daily",
+          "app_billing_daily")
 APP_FILTER = "identity_metadata.acting_resource LIKE 'accounts/%/oauth2/custom-app-integrations/%'"
 
 
@@ -46,8 +47,15 @@ def test_every_dashboard_table_reference_is_prefixed():
             bare = re.findall(rf"(?<![\w}}]){table}\b", q)
             assert not bare, f"unprefixed {table} in dataset query"
     joined = "\n".join(queries)
-    for table in ("apps_inventory_snapshot", "app_obo_activity_daily", "app_access_activity_daily"):
+    for table in ("apps_inventory_snapshot", "app_obo_activity_daily", "app_access_activity_daily", "app_billing_daily"):
         assert "${var.name_prefix}" + table in joined
+
+
+def test_no_dashboard_dataset_reads_system_tables():
+    # Viewers then only need SELECT on the bundle schema; the job owner reads system tables.
+    for d in _ds_apps()["datasets"]:
+        q = "".join(d["queryLines"])
+        assert not re.search(r"\bsystem\.", q, re.I), d["name"]
 
 
 def test_refresh_sql_builds_prefixed_names_and_validates_prefix():
@@ -55,6 +63,7 @@ def test_refresh_sql_builds_prefixed_names_and_validates_prefix():
     assert ":name_prefix || 'app_obo_activity_daily'" in sql
     assert ":name_prefix || 'app_config_events_daily'" in sql
     assert ":name_prefix || 'app_access_activity_daily'" in sql
+    assert ":name_prefix || 'app_billing_daily'" in sql
     assert re.search(r"regexp_replace\(:name_prefix, '\[A-Za-z0-9_\]', ''\) <> ''", sql)
     assert "SCHEDULE EVERY" not in sql
     assert "DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST" in sql
@@ -75,7 +84,7 @@ def test_every_mv_statement_targets_a_validated_name():
     last_guard = sql.rindex("SIGNAL SQLSTATE")
     # Names are assigned exactly once, after all validation.
     sets = re.findall(r"^\s*SET (\w+) = (.*);", sql, re.M)
-    assert [name for name, _ in sets] == ["obo_mv", "config_mv", "access_mv"]
+    assert [name for name, _ in sets] == ["obo_mv", "config_mv", "access_mv", "billing_mv"]
     for name, _ in sets:
         assert sql.index(f"SET {name} =") > last_guard
     # No statement names an MV literally; every one runs on a validated name.
@@ -83,7 +92,7 @@ def test_every_mv_statement_targets_a_validated_name():
     targets = re.findall(r"EXECUTE IMMEDIATE '([A-Z ]+?) ' \|\| (\w+)", sql)
     # CREATE OR REPLACE applies definition changes to existing MVs and
     # recomputes them, so there is no separate REFRESH.
-    mvs = ["obo_mv", "config_mv", "access_mv"]
+    mvs = ["obo_mv", "config_mv", "access_mv", "billing_mv"]
     assert sorted(targets) == sorted(
         [("CREATE OR REPLACE MATERIALIZED VIEW", mv) for mv in mvs]
         + [("ALTER MATERIALIZED VIEW", mv) for mv in mvs]
@@ -109,11 +118,12 @@ def test_mv_definitions_match_shared_governance_sql():
     shared_sql = (REPO / "sql/governance/06_app_activity_daily_mvs.sql").read_text()
     shared = _select_bodies(shared_sql)
     assert len(shared) == 2
-    # The bundle also owns app_access_activity_daily, which has no shared copy.
+    # The bundle also owns app_access_activity_daily and app_billing_daily, which have no shared copy.
     bundle = _select_bodies(bundle_sql)
     assert bundle[:2] == shared
-    assert len(bundle) == 3
+    assert len(bundle) == 4
     assert "app_access_activity_daily" not in shared_sql
+    assert "app_billing_daily" not in shared_sql
 
 
 def test_obo_mv_keeps_only_databricks_apps_and_appends_client_id():
@@ -148,6 +158,27 @@ def test_access_mv_signals():
     # SP activity excludes token/auth and source-export actions every running app emits.
     for noise in ("oidcTokenAuthorization", "workspaceInHouseOAuthClientAuthentication", "mintOAuthToken", "tokenLogin", "workspaceExport"):
         assert f"'{noise}'" in access
+
+
+def test_billing_mv_keeps_apps_rows_daily():
+    billing = _select_bodies((BUNDLE / "src/refresh_app_mvs.sql").read_text())[3]
+    assert billing.startswith(
+        "SELECT usage_date, workspace_id, usage_metadata.app_id AS app_id, "
+        "usage_metadata.app_name AS app_name, sum(usage_quantity) AS dbus FROM system.billing.usage "
+    )
+    assert "WHERE usage_date >= date_sub(current_date(), 90) AND usage_metadata.app_id IS NOT NULL" in billing
+    assert billing.endswith(
+        "GROUP BY usage_date, workspace_id, usage_metadata.app_id, usage_metadata.app_name"
+    )
+
+
+def test_dashboard_billing_reads_bundle_mv():
+    for name in ("ds_apps", "ds_spend_trend"):
+        q = _query(name)
+        assert "FROM ${var.name_prefix}app_billing_daily u" in q, name
+        # The MV keeps 90 days as of its last refresh; the dataset re-applies the window.
+        assert "u.usage_date >= date_sub(current_date(), 90)" in q, name
+        assert "usage_metadata" not in q, name
 
 
 def _ds_apps():

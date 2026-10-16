@@ -35,7 +35,8 @@ variables:
     description: >-
       Prepended to every UC object this bundle creates or refreshes
       (<prefix>apps_inventory_snapshot, <prefix>app_obo_activity_daily,
-      <prefix>app_config_events_daily). Must match ^[A-Za-z0-9_]*$. Empty
+      <prefix>app_config_events_daily, <prefix>app_access_activity_daily,
+      <prefix>app_billing_daily). Must match ^[A-Za-z0-9_]*$. Empty
       means the unprefixed names, which are the admin-insights app's shared MVs.
     default: ""
 

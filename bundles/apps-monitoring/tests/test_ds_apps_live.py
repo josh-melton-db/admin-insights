@@ -95,8 +95,8 @@ def _access():
 
 def _billing():
     return " UNION ALL ".join(
-        f"SELECT '1' AS workspace_id, current_date() AS usage_date, 5.0 AS usage_quantity, "
-        f"named_struct('app_id', 'id_{name}') AS usage_metadata"
+        f"SELECT current_date() AS usage_date, '1' AS workspace_id, 'id_{name}' AS app_id, "
+        f"'{name}' AS app_name, 5.0 AS dbus"
         for name in APPS
     )
 
@@ -110,7 +110,7 @@ def _ds_apps_sql():
         ("${var.name_prefix}apps_inventory_snapshot", "fx_snapshot"),
         ("${var.name_prefix}app_obo_activity_daily", "fx_obo"),
         ("${var.name_prefix}app_access_activity_daily", "fx_access"),
-        ("system.billing.usage", "fx_billing"),
+        ("${var.name_prefix}app_billing_daily", "fx_billing"),
     ):
         assert table in q, table
         q = q.replace(table, fixture)
