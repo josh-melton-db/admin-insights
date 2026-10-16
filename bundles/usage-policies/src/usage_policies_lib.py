@@ -407,22 +407,26 @@ def _gone(client, pid):
         return True
 
 
-def _still_owned(client, s, adopted):
+def _still_owned(client, s, just_adopted=False):
     """Re-read the target right before a change: it must still have the planned name and the
-    marker (an adopt only needs the name). All SETTLE_READS reads must agree, because one
-    stale replica can still show the marker after it was removed."""
-    for i in range(SETTLE_READS):
+    marker (only the adopt step itself is exempt from the marker). SETTLE_READS consecutive reads
+    must agree, because one stale replica can still show the marker after it was removed.
+
+    Normally a single disagreeing read refuses the step. Right after this apply adopted the
+    policy, a read without the marker may just be stale, so disagreeing reads are retried with
+    the usual bounded backoff, but SETTLE_READS agreeing reads in a row are still required.
+    """
+    def owned():
         try:
             live = client.get_policy(s.policy_id)
         except NotFound:
             return False
-        if live.get("policy_name") != s.name:
-            return False
-        if s.action != "adopt" and s.policy_id not in adopted and not is_managed(live):
-            return False
-        if i < SETTLE_READS - 1:
-            client.sleep(1.0)
-    return True
+        return live.get("policy_name") == s.name and (s.action == "adopt" or is_managed(live))
+
+    ok, last = retry(client, owned, bool, attempts=6 if just_adopted else 1, settle=SETTLE_READS)
+    if not ok and isinstance(last, DatabricksError):
+        raise last  # e.g. 403: report the step as failed, not as changed
+    return ok
 
 
 def apply_plan(client, steps, run_token, caller, allow_deletes):
@@ -448,7 +452,7 @@ def apply_plan(client, steps, run_token, caller, allow_deletes):
             r["status"], r["message"] = "skipped", "policy was not created"
             continue
         try:
-            if s.policy_id and not _still_owned(client, s, adopted):
+            if s.policy_id and not _still_owned(client, s, s.policy_id in adopted):
                 r["status"] = "skipped"
                 r["message"] = "target changed since plan (renamed, deleted, or managed marker removed); re-run the plan"
                 continue

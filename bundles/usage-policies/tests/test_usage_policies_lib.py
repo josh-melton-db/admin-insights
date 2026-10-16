@@ -670,3 +670,53 @@ def test_prepare_lists_shape_errors_with_other_validation_errors():
     assert "[missing] missing required tag 'cost_center'" in text
     assert [p.name for p in pols] == ["ok", "missing"]
     assert lib.prepare("nope", WS, REQ)[1] == ["POLICIES must be a list"]
+
+
+def _after_adopt_verified(api, pid, on_get):
+    """Wrap the fake: once the adopt PATCH has been verified (SETTLE_READS GETs), call on_get(n, resp)
+    for every later GET of the policy, n = 1, 2, ..."""
+    state = {"patched": False, "gets": 0}
+
+    def do(method, path, query=None, body=None, **kw):
+        resp = api(method, path, query, body, **kw)
+        if method == "PATCH" and path == f"{lib.BASE}/{pid}":
+            state["patched"] = True
+        elif method == "GET" and path == f"{lib.BASE}/{pid}" and state["patched"]:
+            state["gets"] += 1
+            if state["gets"] > lib.SETTLE_READS:
+                return on_get(state["gets"] - lib.SETTLE_READS, resp)
+        return resp
+    return do
+
+
+def test_grants_after_adopt_refused_when_marker_removed_before_grants_step():
+    api = FakeApi()
+    pid = api.add("zz-b", TAGS)
+    _, steps = plan(api, [pol("zz-b", users=["groups/g"])])
+    assert actions(steps) == [("zz-b", "adopt"), ("zz-b", "grants")]
+
+    def marker_removed(n, resp):
+        unmark(api, pid)
+        return api.policies[pid]
+
+    c = lib.Client(ws_client(_after_adopt_verified(api, pid, marker_removed)), ACCT, sleep=lambda s: None)
+    res = lib.apply_plan(c, steps, "t", ME, False)
+    # The adopt itself was verified, but the final list check sees the marker gone, so it is unconfirmed.
+    assert [(r["action"], r["status"]) for r in res] == [("adopt", "unconfirmed"), ("grants", "skipped")]
+    assert "target changed since plan" in res[1]["message"]
+    assert "PUT" not in mutations(api)
+
+
+def test_grants_after_adopt_tolerates_one_stale_read_without_marker():
+    api = FakeApi()
+    pid = api.add("zz-b", TAGS)
+    _, steps = plan(api, [pol("zz-b", users=["groups/g"])])
+    pre_adopt = {**api.policies[pid]}
+
+    def one_stale(n, resp):
+        return pre_adopt if n == 1 else resp
+
+    c = lib.Client(ws_client(_after_adopt_verified(api, pid, one_stale)), ACCT, sleep=lambda s: None)
+    res = lib.apply_plan(c, steps, "t", ME, False)
+    assert [(r["action"], r["status"]) for r in res] == [("adopt", "ok"), ("grants", "ok")]
+    assert lib._principals(api.rules[pid]["grant_rules"], lib.USER_ROLE) == {"groups/g"}
