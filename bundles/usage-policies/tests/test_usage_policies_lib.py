@@ -305,7 +305,7 @@ def test_caller_manager_grant_is_never_removed():
     rules = {r["role"]: r["principals"] for r in steps[0].grant_rules}
     assert rules[lib.MANAGER_ROLE] == [ME]
     d = "\n".join(steps[0].details)
-    assert f"- managers: {ME}" not in d and "caller's Manager grant is kept" in d
+    assert f"- managers: {ME}" not in d and "direct Manager grant" in d
 
 
 def test_delete_planned_only_for_marked_policies_and_flagged_without_allow_deletes():
@@ -426,8 +426,9 @@ def test_verify_retries_stale_read_after_write_with_backoff():
     res = lib.apply_plan(c, steps, "t", ME, False)
     assert by_action(res) == {("zz-a", "update"): "ok"}
     gets = [p for m, p, q, b in api.calls if m == "GET" and p == f"{lib.BASE}/{pid}"]
-    assert len(gets) == 2 + lib.SETTLE_READS  # two stale reads, then SETTLE_READS fresh ones in a row
-    assert sleeps[:2] == [1.0, 2.0]
+    # ownership re-check, then two stale reads, then SETTLE_READS fresh ones in a row
+    assert len(gets) == lib.SETTLE_READS + 2 + lib.SETTLE_READS
+    assert sleeps[lib.SETTLE_READS - 1:][:2] == [1.0, 2.0]
 
 
 def test_retry_requires_consecutive_fresh_reads_because_replicas_flip():
@@ -531,6 +532,141 @@ def test_chargeback_dates_default_and_validate():
         lib.chargeback_dates("2026-02-01", "2026-01-01")
     with pytest.raises(ValueError):
         lib.chargeback_dates("01/01/2026", "")
-    sql = lib.CHARGEBACK_SQL
+    sql = lib.chargeback_sql("day")
     assert ":start_date" in sql and ":end_date" in sql and "system.billing.list_prices" in sql
     assert "usage_policy_id" in sql and "budget_policy_id" in sql
+
+
+# --- review fixes: apply-time ownership, lockout, chargeback units, shape errors
+
+def unmark(api, pid):
+    api.policies[pid]["custom_tags"] = [t for t in api.policies[pid]["custom_tags"] if t["key"] != lib.MARKER_KEY]
+
+
+def mutations(api):
+    return [c[0] for c in api.calls if c[0] in ("POST", "PATCH", "DELETE", "PUT")]
+
+
+def test_delete_refused_when_marker_removed_between_plan_and_apply():
+    api = FakeApi()
+    pid = api.add("zz-gone", {**TAGS, **MARK})
+    c, steps = plan(api, [], allow_deletes=True)
+    assert actions(steps) == [("zz-gone", "delete")]
+    unmark(api, pid)
+    res = lib.apply_plan(c, steps, "t", ME, True)
+    assert by_action(res) == {("zz-gone", "delete"): "skipped"}
+    assert "target changed since plan" in res[0]["message"]
+    assert mutations(api) == [] and pid in api.policies
+
+
+def test_delete_refused_when_policy_renamed_or_gone_after_plan():
+    api = FakeApi()
+    renamed = api.add("zz-r", {**TAGS, **MARK})
+    gone = api.add("zz-g", {**TAGS, **MARK})
+    c, steps = plan(api, [], allow_deletes=True)
+    api.policies[renamed]["policy_name"] = "someone-else"
+    del api.policies[gone]
+    res = lib.apply_plan(c, steps, "t", ME, True)
+    assert {r["status"] for r in res} == {"skipped"}
+    assert all("target changed since plan" in r["message"] for r in res)
+    assert mutations(api) == []
+
+
+def test_update_and_grants_refused_when_marker_removed_after_plan():
+    api = FakeApi()
+    pid = api.add("zz-a", {**TAGS, "project": "old", **MARK})
+    c, steps = plan(api, [pol(users=["groups/g"])])
+    assert actions(steps) == [("zz-a", "update"), ("zz-a", "grants")]
+    unmark(api, pid)
+    res = lib.apply_plan(c, steps, "t", ME, False)
+    assert [r["status"] for r in res] == ["skipped", "skipped"]
+    assert mutations(api) == []
+
+
+def test_ownership_check_needs_consecutive_confirming_reads():
+    # One stale read still showing the marker must not be enough to delete.
+    api = FakeApi()
+    pid = api.add("zz-gone", {**TAGS, **MARK})
+    c, steps = plan(api, [], allow_deletes=True)
+    marked = dict(api.policies[pid])
+    unmark(api, pid)
+    real = api.__call__
+    served = {"n": 0}
+
+    def flaky(method, path, query=None, body=None, **kw):
+        if method == "GET" and path == f"{lib.BASE}/{pid}" and served["n"] == 0:
+            served["n"] += 1
+            return marked
+        return real(method, path, query, body, **kw)
+
+    c = lib.Client(ws_client(flaky), ACCT, sleep=lambda s: None)
+    res = lib.apply_plan(c, steps, "t", ME, True)
+    assert res[0]["status"] == "skipped" and mutations(api) == []
+
+
+def test_adopt_then_grants_in_same_apply_passes_ownership_check():
+    api = FakeApi()
+    pid = api.add("zz-b", TAGS)
+    c, steps = plan(api, [pol("zz-b", users=["groups/g"])])
+    assert actions(steps) == [("zz-b", "adopt"), ("zz-b", "grants")]
+    res = lib.apply_plan(c, steps, "t", ME, False)
+    assert by_action(res) == {("zz-b", "adopt"): "ok", ("zz-b", "grants"): "ok"}
+    assert lib._principals(api.rules[pid]["grant_rules"], lib.USER_ROLE) == {"groups/g"}
+
+
+def test_group_only_manager_caller_gets_a_direct_manager_grant():
+    rules, details = lib.compute_grants([{"role": lib.MANAGER_ROLE, "principals": ["groups/admins"]}], [], [], ME)
+    assert {r["role"]: r["principals"] for r in rules} == {lib.MANAGER_ROLE: [ME]}
+    d = "\n".join(details)
+    assert f"+ managers: {ME}" in d and "- managers: groups/admins" in d
+    assert "direct Manager grant" in d
+
+
+def test_plan_for_group_only_manager_caller_keeps_direct_access():
+    api = FakeApi()
+    pid = api.add("zz-a", {**TAGS, **MARK}, rules=[{"role": lib.MANAGER_ROLE, "principals": ["groups/admins"]}])
+    c, steps = plan(api, [pol(managers=[])])
+    lib.apply_plan(c, steps, "t", ME, False)
+    assert lib._principals(api.rules[pid]["grant_rules"], lib.MANAGER_ROLE) == {ME}
+
+
+def test_chargeback_sql_filters_one_currency_and_groups_by_usage_unit():
+    for dim in ("policy", "tag", "day"):
+        sql = lib.chargeback_sql(dim)
+        assert "p.currency_code = :currency_code" in sql
+        assert "AND u.usage_end_time >= p.price_start_time" in sql
+        group_by = sql.split("GROUP BY", 1)[1]
+        assert "usage_unit" in group_by and "currency_code" in group_by
+        assert "usage_unit" in sql.split("FROM", 1)[0] and "dbus" not in sql
+    assert ":tag_key" in lib.chargeback_sql("tag")
+    assert "policy_id" in lib.chargeback_sql("policy").split("GROUP BY", 1)[1]
+    assert "usage_date" in lib.chargeback_sql("day").split("GROUP BY", 1)[1]
+    with pytest.raises(ValueError):
+        lib.chargeback_sql("nope")
+
+
+def test_currency_code_is_validated():
+    assert lib.currency_code("") == "USD" and lib.currency_code(" eur ") == "EUR"
+    with pytest.raises(ValueError):
+        lib.currency_code("US Dollar")
+
+
+def test_prepare_lists_shape_errors_with_other_validation_errors():
+    pols, errs = lib.prepare([
+        {"name": "ok", "tags": TAGS},
+        {"name": "badtags", "tags": ["cost_center"]},
+        {"name": "typo", "tags": TAGS, "manager": ["groups/g"]},
+        {"tags": TAGS},
+        {"name": "strusers", "tags": TAGS, "users": "groups/g"},
+        "not-a-dict",
+        {"name": "missing", "tags": {"project": "p"}},
+    ], WS, REQ)
+    text = "\n".join(errs)
+    assert "[badtags] tags must be a mapping" in text
+    assert "[typo] unknown field(s): manager" in text
+    assert "policy #4: missing field(s): name" in text
+    assert "[strusers] users must be a list" in text
+    assert "policy #6: must be a dict" in text
+    assert "[missing] missing required tag 'cost_center'" in text
+    assert [p.name for p in pols] == ["ok", "missing"]
+    assert lib.prepare("nope", WS, REQ)[1] == ["POLICIES must be a list"]

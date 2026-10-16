@@ -8,6 +8,7 @@ import pprint
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from databricks.sdk.errors import AlreadyExists, DatabricksError, NotFound, ResourceAlreadyExists
@@ -50,6 +51,50 @@ def normalize(declared, current_workspace_id):
             ws = sorted({int(i) for i in ws})
         out.append(Policy(p.name, dict(p.tags or {}), ws, list(p.users or []), list(p.managers or [])))
     return out
+
+
+_FIELDS = ("name", "tags", "workspace_ids", "users", "managers")
+
+
+def prepare(declared, current_workspace_id, required_tag_keys):
+    """Shape-check, normalize, and validate raw POLICIES. Returns (policies, every_error).
+
+    Malformed entries (not a dict, unknown or missing fields, wrong types) are reported in the
+    same error list as the other validation errors instead of raising, and are left out.
+    """
+    if not isinstance(declared, (list, tuple)):
+        return [], ["POLICIES must be a list"]
+    ok, errs = [], []
+    for i, d in enumerate(declared, 1):
+        e = _shape_errors(i, d)
+        errs += e
+        if not e:
+            ok.append(d)
+    policies = normalize(ok, current_workspace_id)
+    return policies, errs + validate(policies, required_tag_keys)
+
+
+def _shape_errors(i, d):
+    if isinstance(d, Policy):
+        d = {f: getattr(d, f) for f in _FIELDS}
+    if not isinstance(d, Mapping):
+        return [f"policy #{i}: must be a dict with {', '.join(_FIELDS)}"]
+    label = f"[{d['name']}]" if isinstance(d.get("name"), str) and d.get("name") else f"policy #{i}:"
+    errs = []
+    unknown = sorted(set(map(str, d)) - set(_FIELDS))
+    if unknown:
+        errs.append(f"{label} unknown field(s): {', '.join(unknown)} (allowed: {', '.join(_FIELDS)})")
+    missing = [f for f in ("name", "tags") if f not in d]
+    if missing:
+        errs.append(f"{label} missing field(s): {', '.join(missing)}")
+    if "name" in d and not isinstance(d["name"], str):
+        errs.append(f"{label} name must be a string")
+    if "tags" in d and not isinstance(d["tags"], Mapping):
+        errs.append(f"{label} tags must be a mapping of key -> value")
+    for f in ("users", "managers"):
+        if d.get(f) is not None and not isinstance(d[f], (list, tuple)):
+            errs.append(f"{label} {f} must be a list of principals")
+    return errs
 
 
 def _is_int(v):
@@ -239,15 +284,16 @@ def _principals(rules, role):
 
 
 def compute_grants(current_rules, users, managers, caller):
-    """Authoritative User/Manager principals; other roles kept; caller's Manager grant never removed.
+    """Authoritative User/Manager principals; other roles kept.
 
+    The caller always ends with a DIRECT Manager grant, even if its current access is only
+    through a group the declaration drops, so it can never lock itself out.
     Returns (new_grant_rules, details); details is empty when nothing changes.
     """
     current_rules = current_rules or []
     want = {USER_ROLE: set(users), MANAGER_ROLE: set(managers)}
-    kept_caller = caller in _principals(current_rules, MANAGER_ROLE) and caller not in want[MANAGER_ROLE]
-    if kept_caller:
-        want[MANAGER_ROLE].add(caller)
+    kept_caller = caller not in want[MANAGER_ROLE]
+    want[MANAGER_ROLE].add(caller)
     details = []
     for role, label in ((USER_ROLE, "users"), (MANAGER_ROLE, "managers")):
         cur = _principals(current_rules, role)
@@ -256,7 +302,9 @@ def compute_grants(current_rules, users, managers, caller):
     new_rules = [r for r in current_rules if r.get("role") not in ROLES]
     new_rules += [{"role": role, "principals": sorted(want[role])} for role in ROLES if want[role]]
     if details and kept_caller:
-        details.append(f"note: the caller's Manager grant is kept ({caller}); it is never removed")
+        how = "kept" if caller in _principals(current_rules, MANAGER_ROLE) else "added"
+        details.append(f"note: a direct Manager grant for the caller ({caller}) is {how}; "
+                       "the caller's own Manager access is never removed")
     return new_rules, details
 
 
@@ -359,12 +407,32 @@ def _gone(client, pid):
         return True
 
 
+def _still_owned(client, s, adopted):
+    """Re-read the target right before a change: it must still have the planned name and the
+    marker (an adopt only needs the name). All SETTLE_READS reads must agree, because one
+    stale replica can still show the marker after it was removed."""
+    for i in range(SETTLE_READS):
+        try:
+            live = client.get_policy(s.policy_id)
+        except NotFound:
+            return False
+        if live.get("policy_name") != s.name:
+            return False
+        if s.action != "adopt" and s.policy_id not in adopted and not is_managed(live):
+            return False
+        if i < SETTLE_READS - 1:
+            client.sleep(1.0)
+    return True
+
+
 def apply_plan(client, steps, run_token, caller, allow_deletes):
     """Execute the plan, then re-read each change with retry.
 
     Each result has status ok | failed | skipped | unconfirmed. One failure does not stop the rest.
+    Before every delete, update, adopt, or grants change on an existing policy, the target is
+    re-read and the step is skipped if it no longer matches the plan.
     """
-    results, created = [], {}
+    results, created, adopted = [], {}, set()
     for s in steps:
         r = {"policy": s.name, "action": s.action, "policy_id": s.policy_id or "", "status": "ok", "message": ""}
         results.append(r)
@@ -380,6 +448,10 @@ def apply_plan(client, steps, run_token, caller, allow_deletes):
             r["status"], r["message"] = "skipped", "policy was not created"
             continue
         try:
+            if s.policy_id and not _still_owned(client, s, adopted):
+                r["status"] = "skipped"
+                r["message"] = "target changed since plan (renamed, deleted, or managed marker removed); re-run the plan"
+                continue
             if s.action == "create":
                 pid = client.create_policy(s.body, request_id(run_token, s.name))["policy_id"]
                 created[s.name] = pid
@@ -402,6 +474,8 @@ def apply_plan(client, steps, run_token, caller, allow_deletes):
                 ok, _ = retry(client, lambda: client.get_rule_set(pid),
                               lambda v: _same_grants(v.get("grant_rules"), rules), settle=SETTLE_READS)
             r["policy_id"] = pid
+            if ok and s.action == "adopt":
+                adopted.add(pid)
             if not ok:
                 r["status"], r["message"] = "unconfirmed", "change sent; re-read did not reflect it yet"
         except (AlreadyExists, ResourceAlreadyExists) as e:
@@ -469,24 +543,61 @@ def export_policies(client, current_workspace_id):
 
 # --- chargeback -------------------------------------------------------------
 
-CHARGEBACK_SQL = """
+_USAGE_SQL = """
 SELECT
   u.usage_date,
   COALESCE(u.usage_metadata.usage_policy_id, u.usage_metadata.budget_policy_id) AS policy_id,
   u.custom_tags,
-  u.sku_name,
-  u.usage_quantity AS dbus,
+  u.usage_unit,
+  u.usage_quantity,
+  CAST(:currency_code AS STRING) AS currency_code,
   u.usage_quantity * CAST(p.pricing.default AS DOUBLE) AS est_list_cost
 FROM system.billing.usage u
 LEFT JOIN system.billing.list_prices p
   ON u.sku_name = p.sku_name
   AND u.cloud = p.cloud
   AND u.usage_unit = p.usage_unit
+  AND p.currency_code = :currency_code
   AND u.usage_end_time >= p.price_start_time
   AND (p.price_end_time IS NULL OR u.usage_end_time < p.price_end_time)
 WHERE u.usage_date BETWEEN CAST(:start_date AS DATE) AND CAST(:end_date AS DATE)
   AND COALESCE(u.usage_metadata.usage_policy_id, u.usage_metadata.budget_policy_id) IS NOT NULL
 """
+
+_DIMENSIONS = {
+    "policy": ("policy_id", "policy_id"),
+    "tag": ("COALESCE(custom_tags[:tag_key], '(untagged)') AS tag_value", "tag_value"),
+    "day": ("usage_date", "usage_date"),
+}
+
+
+def chargeback_sql(dimension):
+    """Spend grouped by `dimension` (policy | tag | day), always also by usage_unit and currency.
+
+    Usage quantities are never summed across units (DBU, GPU hours, ...). Prices come from one
+    currency only (the join filters list_prices by :currency_code) inside the effective window,
+    so a SKU priced in several currencies cannot multiply rows. Parameters: :start_date,
+    :end_date, :currency_code, and :tag_key for the tag dimension.
+    """
+    if dimension not in _DIMENSIONS:
+        raise ValueError(f"dimension must be one of {sorted(_DIMENSIONS)}")
+    select, key = _DIMENSIONS[dimension]
+    return f"""WITH usage AS ({_USAGE_SQL})
+SELECT {select}, usage_unit, currency_code,
+  ROUND(SUM(usage_quantity), 4) AS usage_quantity,
+  ROUND(SUM(est_list_cost), 2) AS est_list_cost
+FROM usage
+GROUP BY {key}, usage_unit, currency_code
+ORDER BY {"usage_date" if dimension == "day" else "est_list_cost DESC NULLS LAST"}, usage_unit
+"""
+
+
+def currency_code(value):
+    """ISO 4217 code for the list_prices join; blank means USD."""
+    code = (value or "USD").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", code):
+        raise ValueError(f"currency_code must be a 3-letter ISO code, got {value!r}")
+    return code
 
 
 def chargeback_dates(start, end, today=None):

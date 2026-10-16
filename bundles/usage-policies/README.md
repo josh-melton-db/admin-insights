@@ -34,6 +34,7 @@ widgets are:
 | `apply` | `false` | `true` executes the plan. With `false` the notebook only validates, plans, imports, and reports chargeback. |
 | `allow_deletes` | `false` | `true` allows planned deletes to execute (needs `apply=true` too). |
 | `chargeback_start_date` / `chargeback_end_date` | last 30 days | `YYYY-MM-DD` range for the chargeback cells. |
+| `currency_code` | `USD` | The `list_prices` currency used for the estimated list cost. |
 | `account_id` | empty | Overrides the discovered account ID. |
 
 The cells run in this order: declare, widgets, validate (fails fast and lists every error),
@@ -58,7 +59,9 @@ POLICIES = [
 ```
 
 Principals are `users/<email>`, `groups/<account group name>`, or
-`servicePrincipals/<applicationId>`. Validation checks the following:
+`servicePrincipals/<applicationId>`. Malformed entries are listed together with every other error,
+and nothing is raised early. Malformed means not a dict, an unknown field such as `manager`, a missing `name`/`tags`,
+`tags` that is not a mapping, or `users` that is a string instead of a list. Validation also checks the following:
 
 - Names are unique and 1-127 characters long.
 - Tag values are at most 256 characters, and tag keys are unique (case-insensitive).
@@ -102,11 +105,19 @@ the plan shows `adopt`, and apply adds the marker plus the declared fields.
   policies that carry the marker and that you can see are in scope, including
   policies managed from another workspace's copy of this notebook. Declare them,
   or leave `allow_deletes=false`.
+- **Apply-time ownership check.** The plan's ownership decision is re-checked
+  before every delete, update, adopt, or grants change on an existing policy.
+  Apply re-reads the policy and requires it to still have the planned name and,
+  except for an adopt, the marker. Three consecutive reads must agree, because one
+  stale replica can still show a marker that was removed. Otherwise the step is
+  `skipped: target changed since plan`, and the other steps continue.
 - **Grants** are authoritative for `roles/budgetPolicy.user` and
   `roles/budgetPolicy.manager` on declared policies. An empty list removes
-  everyone from that role. The single exception is your own Manager grant: it is
-  never removed, so you cannot lock yourself out, and the plan says so. Grant rules for
-  other roles are left unchanged. Each write uses the etag from the latest read.
+  everyone from that role. The exception is you: the caller always ends with
+  a **direct** Manager grant (`users/<you>` or `servicePrincipals/<appId>`). If
+  your Manager access comes only through a group that the declaration drops, the
+  grant is added, so you cannot lock yourself out, and the plan says so. Grant rules
+  for other roles are left unchanged. Each write uses the etag from the latest read.
 - **Updates** always send the full desired policy object (name, tags, workspaces).
   The API clears any field that is omitted, and tags are replaced as a whole.
 - **Retries.** Each create carries a `request_id` derived from a per-session
@@ -136,6 +147,17 @@ the plan shows `adopt`, and apply adds the marker plus the declared fields.
   workspace admin can query both. The usage covers the whole account, and the IDs of
   policies you cannot see are shown as "(not visible to caller)", because no
   system table lists policy names.
+
+## Chargeback
+
+There are three tables: by policy, by each required tag key, and by day. Every table is grouped by
+`usage_unit` and `currency_code` as well, so quantities in different units
+(for example DBU and DSU) are never summed together. `est_list_cost` is
+`usage_quantity` × the list price. Prices are joined from `list_prices` in a single currency (the
+`currency_code` widget) and within each price's effective window. A SKU that is
+priced in several currencies therefore cannot multiply rows. Usage with no list price
+in that currency keeps its quantity and gets a null cost. These are list
+prices, not your negotiated rates.
 
 ## Account ID discovery
 

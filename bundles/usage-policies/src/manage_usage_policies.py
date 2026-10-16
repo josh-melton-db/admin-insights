@@ -38,6 +38,7 @@ dbutils.widgets.dropdown("apply", "false", ["false", "true"])
 dbutils.widgets.dropdown("allow_deletes", "false", ["false", "true"])
 dbutils.widgets.text("chargeback_start_date", (dt.date.today() - dt.timedelta(days=30)).isoformat())
 dbutils.widgets.text("chargeback_end_date", dt.date.today().isoformat())
+dbutils.widgets.text("currency_code", "USD")
 dbutils.widgets.text("account_id", "")
 
 APPLY = dbutils.widgets.get("apply") == "true"
@@ -66,8 +67,7 @@ try:
 except NameError:
     RUN_TOKEN = str(uuid.uuid4())
 
-declared = lib.normalize(POLICIES, WORKSPACE_ID)
-errors = lib.validate(declared, REQUIRED_TAG_KEYS)
+declared, errors = lib.prepare(POLICIES, WORKSPACE_ID, REQUIRED_TAG_KEYS)
 if errors:
     raise ValueError("Invalid POLICIES:\n" + "\n".join(f"  - {e}" for e in errors))
 print(f"{len(declared)} declared policies are valid. Caller: {CALLER}")
@@ -100,27 +100,27 @@ print(lib.export_policies(client, WORKSPACE_ID))
 
 # COMMAND ----------
 
-# 7. Chargeback: spend by policy, by required tag, and by day (list-price estimate).
+# 7. Chargeback: spend by policy, by required tag, and by day (list-price estimate in one currency).
+# Every table keeps usage_unit, so quantities in different units (DBU, GPU hours, ...) are never summed together.
 from pyspark.sql import functions as F
 
 start, end = lib.chargeback_dates(dbutils.widgets.get("chargeback_start_date"),
                                   dbutils.widgets.get("chargeback_end_date"))
-usage = spark.sql(lib.CHARGEBACK_SQL, args={"start_date": start, "end_date": end})
+args = {"start_date": start, "end_date": end, "currency_code": lib.currency_code(dbutils.widgets.get("currency_code"))}
 names = spark.createDataFrame([(p["policy_id"], p["policy_name"]) for p in client.list_policies()],
                               "policy_id string, policy_name string")
-usage = usage.join(names, "policy_id", "left").withColumn(
-    "policy_name", F.coalesce("policy_name", F.lit("(not visible to caller)")))
-spend = [F.round(F.sum("dbus"), 2).alias("dbus"), F.round(F.sum("est_list_cost"), 2).alias("est_list_cost")]
-print(f"Chargeback {start} .. {end}")
+print(f"Chargeback {start} .. {end}, list prices in {args['currency_code']}")
 
-display(usage.groupBy("policy_id", "policy_name").agg(*spend).orderBy(F.desc("est_list_cost")))
+by_policy = spark.sql(lib.chargeback_sql("policy"), args=args).join(names, "policy_id", "left")
+display(by_policy.withColumn("policy_name", F.coalesce("policy_name", F.lit("(not visible to caller)")))
+        .select("policy_id", "policy_name", "usage_unit", "currency_code", "usage_quantity", "est_list_cost")
+        .orderBy(F.desc_nulls_last("est_list_cost")))
 
 # COMMAND ----------
 
 for key in REQUIRED_TAG_KEYS:
-    display(usage.groupBy(F.coalesce(F.col("custom_tags")[key], F.lit("(untagged)")).alias(key))
-            .agg(*spend).orderBy(F.desc("est_list_cost")))
+    display(spark.sql(lib.chargeback_sql("tag"), args={**args, "tag_key": key}).withColumnRenamed("tag_value", key))
 
 # COMMAND ----------
 
-display(usage.groupBy("usage_date").agg(*spend).orderBy("usage_date"))
+display(spark.sql(lib.chargeback_sql("day"), args=args))
