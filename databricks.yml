@@ -17,6 +17,14 @@ variables:
     description: Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.
   postgres_project:
     description: Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.
+  bootstrap_admins:
+    description: Comma-separated administrator emails (case-insensitive) granted admin access at startup. Required; no default.
+  admin_groups:
+    description: Comma-separated workspace group names whose members are admins.
+    default: admins
+  execution_mode:
+    description: 'Remediation execution mode: `dry_run` (default) or `live`. Any value other than `live` behaves as `dry_run`.'
+    default: dry_run
 
 resources:
   apps:
@@ -28,6 +36,22 @@ resources:
         - sql
         - serving.serving-endpoints
         - catalog.catalogs
+
+      # Runtime command and environment. This replaces app.yaml: when a deployment
+      # sets config, the platform ignores app.yaml entirely.
+      config:
+        command: ['npm', 'run', 'start']
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value_from: sql-warehouse
+          - name: LAKEBASE_ENDPOINT
+            value_from: postgres
+          - name: ADMIN_INSIGHTS_BOOTSTRAP_ADMINS
+            value: ${var.bootstrap_admins}
+          - name: ADMIN_INSIGHTS_ADMIN_GROUPS
+            value: ${var.admin_groups}
+          - name: ADMIN_INSIGHTS_EXECUTION_MODE
+            value: ${var.execution_mode}
 
       # The resources which this app has access to.
       resources:
