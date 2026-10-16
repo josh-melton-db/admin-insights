@@ -14,7 +14,7 @@ def app(name, scopes=None, creator="a@x.com"):
         description=None, service_principal_id=1, service_principal_name="sp", service_principal_client_id="c",
         oauth2_app_client_id="o", url="u")
 
-def run(get_side_effect, listed, users=None, sps=None, argv=("--catalog", "demos", "--schema", "admin_insights")):
+def run_main(get_side_effect, listed, users=None, sps=None, argv=("--catalog", "demos", "--schema", "admin_insights")):
     w = mock.MagicMock()
     w.get_workspace_id.return_value = 1
     w.apps.list.return_value = listed
@@ -27,6 +27,10 @@ def run(get_side_effect, listed, users=None, sps=None, argv=("--catalog", "demos
          mock.patch.object(sys, "argv", ["x", *argv]):
         b.getOrCreate.return_value = spark
         m.main()
+    return spark
+
+def run(*args, **kwargs):
+    spark = run_main(*args, **kwargs)
     rows = spark.createDataFrame.call_args[0][0]
     verify = _make_type_verifier(m.SCHEMA)
     for r in rows: verify(r)
@@ -81,3 +85,34 @@ def test_missing_email_creator_is_inactive_user():
 def test_bad_identifier_fails_fast(bad):
     with pytest.raises(ValueError):
         run(lambda name: app(name), [app("a")], argv=("--catalog", bad, "--schema", "s"))
+
+@pytest.mark.parametrize("good", ["", "monitor_", "A1_b"])
+def test_valid_prefix_accepted(good):
+    assert m.validate_name_prefix(good) == good
+
+@pytest.mark.parametrize("bad", ["monitor-", "a.b", "x`", "m\n", " ", None])
+def test_bad_prefix_fails_fast(bad):
+    with pytest.raises(ValueError):
+        m.validate_name_prefix(bad)
+
+def test_bad_prefix_fails_before_api_calls():
+    argv = ["x", "--catalog", "demos", "--schema", "s", "--name-prefix", "x-"]
+    with mock.patch.object(m, "WorkspaceClient") as wc, mock.patch.object(sys, "argv", argv), \
+         pytest.raises(ValueError):
+        m.main()
+    wc.assert_not_called()
+
+@pytest.mark.parametrize("prefix, expected", [
+    ("monitor_", "`demos`.`admin_insights`.monitor_apps_inventory_snapshot"),
+    ("", "`demos`.`admin_insights`.apps_inventory_snapshot"),
+])
+def test_snapshot_table_name_uses_prefix(prefix, expected):
+    assert m.snapshot_table_name("demos", "admin_insights", prefix) == expected
+    spark = run_main(lambda name: app(name), [app("a")],
+                     argv=("--catalog", "demos", "--schema", "admin_insights", "--name-prefix", prefix))
+    spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_called_once_with(expected)
+
+def test_prefix_defaults_to_empty():
+    spark = run_main(lambda name: app(name), [app("a")])
+    spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_called_once_with(
+        "`demos`.`admin_insights`.apps_inventory_snapshot")

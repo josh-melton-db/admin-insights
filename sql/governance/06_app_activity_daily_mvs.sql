@@ -2,13 +2,14 @@
 -- eligible. These views use a bounded rolling 90-day daily full refresh.
 -- AppKit queries read these MVs rather than scanning audit live.
 -- Run each CREATE as its own warehouse statement.
--- No SCHEDULE: the apps-monitoring bundle job (bundles/apps-monitoring) is the
--- single refresher. It creates these MVs if missing, drops any schedule, and
--- runs REFRESH MATERIALIZED VIEW daily at 06:00 UTC. Keep the definitions and
--- columns in sync with bundles/apps-monitoring/src/refresh_app_mvs.sql.
+-- These MVs refresh themselves (SCHEDULE EVERY 1 DAY). The apps-monitoring
+-- bundle (bundles/apps-monitoring) does not touch them: it owns separate
+-- prefixed copies (e.g. monitor_app_obo_activity_daily) with the same columns.
+-- Keep the SELECTs in sync with bundles/apps-monitoring/src/refresh_app_mvs.sql.
 
 CREATE OR REPLACE MATERIALIZED VIEW demos.admin_insights.app_obo_activity_daily
-COMMENT 'Databricks Apps on-behalf-of (user authorization) facts from the last 90 days of system.access.audit, refreshed daily by the apps-monitoring job. Grain: activity date, workspace, acting resource, user, service, action. acting_resource is the OAuth app ID or name from identity_metadata.'
+COMMENT 'Daily-refreshing Databricks Apps on-behalf-of (user authorization) facts from the last 90 days of system.access.audit. Grain: activity date, workspace, acting resource, user, service, action. acting_resource is the OAuth app ID or name from identity_metadata.'
+SCHEDULE EVERY 1 DAY
 AS
 SELECT
   event_date AS activity_date,
@@ -30,7 +31,8 @@ GROUP BY
   action_name;
 
 CREATE OR REPLACE MATERIALIZED VIEW demos.admin_insights.app_config_events_daily
-COMMENT 'Latest createApp/updateApp payload per app for the last 90 days, refreshed daily by the apps-monitoring job. Used to flag apps that do not declare user_api_scopes (possible app-SP-only authorization).'
+COMMENT 'Daily-refreshing latest createApp/updateApp payload per app for the last 90 days. Used to flag apps that do not declare user_api_scopes (possible app-SP-only authorization).'
+SCHEDULE EVERY 1 DAY
 AS
 SELECT
   event_date AS activity_date,

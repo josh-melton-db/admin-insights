@@ -1,21 +1,32 @@
--- Ensure, unschedule, and refresh the Databricks Apps materialized views.
+-- Ensure, unschedule, and refresh this bundle's Databricks Apps materialized
+-- views, <name_prefix>app_obo_activity_daily and <name_prefix>app_config_events_daily.
 -- The apps-monitoring job is the single refresher of these MVs, so neither
--- MV carries a SCHEDULE. Definitions match sql/governance/06_app_activity_daily_mvs.sql
--- (rolling 90-day window, same columns) because the admin-insights app reads them.
--- :catalog and :schema come from the job parameters.
+-- carries a SCHEDULE. The SELECTs match sql/governance/06_app_activity_daily_mvs.sql
+-- (rolling 90-day window, same columns). With a non-empty prefix this file
+-- never touches the unprefixed MVs that the admin-insights app reads; those
+-- refresh themselves with SCHEDULE EVERY 1 DAY.
+-- :catalog, :schema, and :name_prefix come from the job parameters.
 -- ALTER/REFRESH MATERIALIZED VIEW do not accept IDENTIFIER(), so names are
--- built as strings and run with EXECUTE IMMEDIATE. Both parameters are
--- validated against ^[A-Za-z0-9_]+$ first, so they cannot inject SQL.
+-- built as strings and run with EXECUTE IMMEDIATE. All three parameters are
+-- validated first, so they cannot inject SQL: catalog and schema must match
+-- ^[A-Za-z0-9_]+$, the prefix ^[A-Za-z0-9_]*$ (empty allowed). The check
+-- strips allowed characters and requires nothing left, because RLIKE's $ also
+-- matches before a trailing newline. NULL is rejected explicitly, because a
+-- NULL marker makes the character check NULL rather than TRUE.
 BEGIN
   DECLARE obo_mv STRING;
   DECLARE config_mv STRING;
 
-  IF NOT (:catalog RLIKE '^[A-Za-z0-9_]+$') OR NOT (:schema RLIKE '^[A-Za-z0-9_]+$') THEN
+  IF :catalog IS NULL OR :catalog = '' OR regexp_replace(:catalog, '[A-Za-z0-9_]', '') <> ''
+    OR :schema IS NULL OR :schema = '' OR regexp_replace(:schema, '[A-Za-z0-9_]', '') <> '' THEN
     SIGNAL SQLSTATE '22023' SET MESSAGE_TEXT = 'catalog and schema job parameters must match ^[A-Za-z0-9_]+$';
   END IF;
+  IF :name_prefix IS NULL OR regexp_replace(:name_prefix, '[A-Za-z0-9_]', '') <> '' THEN
+    SIGNAL SQLSTATE '22023' SET MESSAGE_TEXT = 'name_prefix job parameter must match ^[A-Za-z0-9_]*$';
+  END IF;
 
-  SET obo_mv = '`' || :catalog || '`.`' || :schema || '`.app_obo_activity_daily';
-  SET config_mv = '`' || :catalog || '`.`' || :schema || '`.app_config_events_daily';
+  SET obo_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_obo_activity_daily';
+  SET config_mv = '`' || :catalog || '`.`' || :schema || '`.' || :name_prefix || 'app_config_events_daily';
 
   -- 1. Create if missing (no-op when the MV already exists).
   EXECUTE IMMEDIATE 'CREATE MATERIALIZED VIEW IF NOT EXISTS ' || obo_mv || "

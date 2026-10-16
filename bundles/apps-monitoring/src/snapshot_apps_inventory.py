@@ -1,10 +1,11 @@
 """Snapshot the workspace Databricks Apps inventory into a UC table.
 
-Writes <catalog>.<schema>.apps_inventory_snapshot (overwrite) with one row per
-app from WorkspaceClient().apps.list() / apps.get(), plus a creator-active check against
-SCIM users and service principals. Catalog and schema come from job
-parameters (--catalog / --schema), not config files, and must match
-^[A-Za-z0-9_]+$.
+Writes <catalog>.<schema>.<name_prefix>apps_inventory_snapshot (overwrite) with
+one row per app from WorkspaceClient().apps.list() / apps.get(), plus a
+creator-active check against SCIM users and service principals. Catalog,
+schema, and name prefix come from job parameters (--catalog / --schema /
+--name-prefix), not config files. Catalog and schema must match
+^[A-Za-z0-9_]+$; the prefix must match ^[A-Za-z0-9_]*$ (empty allowed).
 """
 
 import argparse
@@ -25,6 +26,7 @@ from pyspark.sql.types import (
 )
 
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
+NAME_PREFIX_RE = re.compile(r"[A-Za-z0-9_]*")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 SCHEMA = StructType(
@@ -92,6 +94,16 @@ def deployment_fields(deployment):
     )
 
 
+def validate_name_prefix(prefix):
+    if not isinstance(prefix, str) or not NAME_PREFIX_RE.fullmatch(prefix):
+        raise ValueError(f"name_prefix must match ^[A-Za-z0-9_]*$, got {prefix!r}")
+    return prefix
+
+
+def snapshot_table_name(catalog, schema, prefix):
+    return f"`{catalog}`.`{schema}`.{validate_name_prefix(prefix)}apps_inventory_snapshot"
+
+
 def classify_creator(w, creator, cache):
     """Return (creator_type, creator_active) for an app creator.
 
@@ -131,10 +143,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)
+    parser.add_argument("--name-prefix", default="")
     args = parser.parse_args()
     for value in (args.catalog, args.schema):
         if not IDENTIFIER_RE.fullmatch(value):
             raise ValueError(f"catalog and schema must match ^[A-Za-z0-9_]+$, got {value!r}")
+    table = snapshot_table_name(args.catalog, args.schema, args.name_prefix)
 
     w = WorkspaceClient()
     workspace_id = str(w.get_workspace_id())
@@ -218,7 +232,6 @@ def main():
             "treating as a workspace-wide error"
         )
 
-    table = f"`{args.catalog}`.`{args.schema}`.apps_inventory_snapshot"
     spark = SparkSession.builder.getOrCreate()
     (
         spark.createDataFrame(rows, SCHEMA)

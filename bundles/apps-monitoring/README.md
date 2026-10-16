@@ -6,9 +6,11 @@ answers "what can we safely delete?" It deploys:
 - **Job `apps-monitoring`** (daily, 06:00 UTC, `max_concurrent_runs: 1`):
   1. `snapshot_apps_inventory`: a serverless Python task. It reads the Apps API
      (`apps.list` + `apps.get`) and SCIM, then overwrites
-     `${catalog}.${schema}.apps_inventory_snapshot`.
-  2. `refresh_app_mvs`: a SQL file task on the warehouse. It ensures the two
-     Apps MVs exist, drops any schedule, and refreshes them.
+     `${catalog}.${schema}.${name_prefix}apps_inventory_snapshot`.
+  2. `refresh_app_mvs`: a SQL file task on the warehouse. It ensures the
+     bundle's two Apps MVs (`${name_prefix}app_obo_activity_daily`,
+     `${name_prefix}app_config_events_daily`) exist, drops any schedule, and
+     refreshes them.
   3. `refresh_dashboard`: a dashboard task that refreshes the dashboard below.
 - **Dashboard `Databricks Apps monitoring`**: an AI/BI dashboard with the pages
   Overview, Deletion candidates, Creators, and Filters.
@@ -22,52 +24,85 @@ app.
 
 ## Deploy and run
 
+No workspace host or warehouse ID is committed. The CLI takes the workspace
+from `--profile`, and `warehouse_id` (a required variable) from a local,
+gitignored overrides file:
+
 ```bash
 cd bundles/apps-monitoring
-databricks bundle validate --profile DEFAULT
-databricks bundle deploy --profile DEFAULT
-databricks bundle run apps_monitoring --profile DEFAULT
-databricks bundle summary --profile DEFAULT   # job + dashboard URLs
+mkdir -p .databricks/bundle/default
+cp variable-overrides.example.json .databricks/bundle/default/variable-overrides.json
+# edit it: replace <sql-warehouse-id> with your serverless SQL warehouse ID
 ```
 
-To change the namespace, override the variables **at deploy time**:
-`databricks bundle deploy --profile DEFAULT --var catalog=main --var schema=ops`.
-Do not override the `catalog`/`schema` job parameters at run time
-(`bundle run --params` or "Run now with different parameters"). The job
-would then write and refresh one namespace while the dashboard, whose dataset
-catalog/schema are bound at deploy time, keeps reading the other.
+`.databricks/` is gitignored, so the real ID stays local. You can also pass
+`--var warehouse_id=<id>` on each command. Then:
 
-Unit tests for the snapshot script (they mock the Apps API and Spark):
+```bash
+databricks bundle validate --profile <profile>
+databricks bundle deploy --profile <profile>
+databricks bundle run apps_monitoring --profile <profile>
+databricks bundle summary --profile <profile>   # job + dashboard URLs
+```
+
+To change the namespace or prefix, override the variables **at deploy time**:
+`databricks bundle deploy --profile <profile> --var catalog=main --var schema=ops --var name_prefix=ops_`.
+Do not override the `catalog`/`schema`/`name_prefix` job parameters at run
+time (`bundle run --params` or "Run now with different parameters"). The job
+would then write and refresh one set of tables while the dashboard, whose
+dataset catalog/schema and table names are bound at deploy time, keeps reading
+the other.
+
+Unit tests (they mock the Apps API and Spark, and statically check that every
+table reference in the job, SQL, and dashboard carries the prefix):
 `python3 -m pytest -q tests/`.
 
-To remove everything: `databricks bundle destroy --profile DEFAULT`. This
-removes the job and the dashboard. It leaves the MVs and the snapshot table in
-place, and the MVs then have no refresher (see below).
+To remove everything: `databricks bundle destroy --profile <profile>`. This
+removes the job and the dashboard. It leaves the prefixed MVs and snapshot
+table in place, and those MVs then have no refresher. Drop them manually if
+you no longer need them.
 
 ## Variables
 
 | Variable | Default | Used by |
 |----------|---------|---------|
-| `warehouse_id` | `2fe54b32b36329be` | `refresh_app_mvs` SQL task, dashboard warehouse, `refresh_dashboard` task |
+| `warehouse_id` | none (required; set in `variable-overrides.json`) | `refresh_app_mvs` SQL task, dashboard warehouse, `refresh_dashboard` task |
 | `catalog` | `demos` | job parameter `catalog`, dashboard `dataset_catalog` |
 | `schema` | `admin_insights` | job parameter `schema`, dashboard `dataset_schema` |
+| `name_prefix` | `""` (the `default` target sets `monitor_`) | job parameter `name_prefix`, every table name in the job and dashboard |
 
-The catalog and schema reach the tasks as job parameters, not config files.
-Both tasks reject values that don't match `^[A-Za-z0-9_]+$` before using them
-in SQL:
+The catalog, schema, and prefix reach the tasks as job parameters, not config
+files. Both tasks fail fast on a catalog or schema that doesn't fully match
+`^[A-Za-z0-9_]+$`, or a prefix that doesn't fully match `^[A-Za-z0-9_]*$`
+(empty allowed), before using them in SQL:
 
-- The Python task receives `--catalog/--schema`.
-- The SQL file receives the named markers `:catalog/:schema`. They are used via
+- The Python task receives `--catalog/--schema/--name-prefix` and checks them
+  with `re.fullmatch`.
+- The SQL file receives the named markers `:catalog/:schema/:name_prefix`. It
+  strips the allowed characters and requires an empty remainder, since RLIKE's
+  `$` also matches before a trailing newline. The values are used via
   `EXECUTE IMMEDIATE`, because `ALTER`/`REFRESH MATERIALIZED VIEW` don't accept
   `IDENTIFIER()`.
 
-Dashboard dataset SQL uses bare table names (`apps_inventory_snapshot`,
-`app_obo_activity_daily`). The bundle's `dataset_catalog`/`dataset_schema`
-fill those in. Only `system.billing.usage` is fully qualified.
+Dashboard dataset SQL uses `${var.name_prefix}`-prefixed table names without a
+catalog or schema (for example `monitor_apps_inventory_snapshot`). The bundle's
+`dataset_catalog`/`dataset_schema` fill those in. Only `system.billing.usage`
+is fully qualified.
+
+The dashboard JSON is inline in `resources/apps_monitoring.dashboard.yml`
+(`serialized_dashboard`) rather than in a `file_path` `.lvdash.json`. The CLI
+substitutes `${var.*}` in YAML strings but not inside a `file_path` file. To
+edit the layout in the UI, export the dashboard JSON, replace each table name's
+`monitor_` with `${var.name_prefix}`, and paste it back under
+`serialized_dashboard: |`.
 
 ## Tables
 
-- `apps_inventory_snapshot` (overwritten daily): one row per app, with these
+All three live in `${catalog}.${schema}` and carry `name_prefix` (with the
+`default` target: `monitor_apps_inventory_snapshot`,
+`monitor_app_obo_activity_daily`, `monitor_app_config_events_daily`).
+
+- `${name_prefix}apps_inventory_snapshot` (overwritten daily): one row per app, with these
   fields:
   - `snapshot_time`, `workspace_id`, `app_name`, `app_id`, `description`
   - `creator`, `creator_type` (`user` / `sp` / `unknown`), `creator_active`
@@ -95,18 +130,22 @@ fill those in. Only `system.billing.usage` is fully qualified.
   - Not found, UUID-shaped → `sp`, `creator_active = false`.
   - Not found, any other shape, or no creator → `unknown`,
     `creator_active = NULL`.
-- `app_obo_activity_daily`, `app_config_events_daily`: the Apps MVs from
-  `sql/governance/06_app_activity_daily_mvs.sql` (90-day rolling window,
-  unchanged columns).
+- `${name_prefix}app_obo_activity_daily`, `${name_prefix}app_config_events_daily`:
+  copies of the Apps MVs in `sql/governance/06_app_activity_daily_mvs.sql`
+  (same SELECTs, 90-day rolling window, same columns). A test checks that the
+  SELECTs stay in sync.
 
-## MV ownership change
+## MV ownership and decoupling from admin-insights
 
-Before this bundle, `app_obo_activity_daily` and `app_config_events_daily`
-refreshed themselves with `SCHEDULE EVERY 1 DAY`. Now the **apps-monitoring job
-is their single refresher**:
+The bundle owns its own prefixed MVs and does not touch the admin-insights
+app's shared MVs (`app_obo_activity_daily`, `app_config_events_daily`), which
+refresh themselves again with `SCHEDULE EVERY 1 DAY`.
 
-- `refresh_app_mvs.sql` runs `CREATE MATERIALIZED VIEW IF NOT EXISTS` with the
-  same definition. This is a no-op when the MV exists.
+For the bundle's prefixed MVs, the **apps-monitoring job is the single
+refresher**:
+
+- `refresh_app_mvs.sql` runs `CREATE MATERIALIZED VIEW IF NOT EXISTS` with no
+  `SCHEDULE`. This is a no-op when the MV exists.
 - It then runs `ALTER MATERIALIZED VIEW … DROP SCHEDULE`. This is made
   idempotent by swallowing only `DROP_SCHEDULE_SCHEDULE_DOES_NOT_EXIST` and
   re-raising any other error.
@@ -115,11 +154,16 @@ is their single refresher**:
 - It finishes with `REFRESH MATERIALIZED VIEW` on each MV, synchronously.
 - The task retries up to twice, 2 minutes apart, on transient warehouse
   errors. Every step is idempotent.
-- `sql/governance/06_app_activity_daily_mvs.sql` no longer has `SCHEDULE`. Keep
-  both definitions in sync.
-- The admin-insights app still reads these MVs. If this job is paused or
-  destroyed, they go stale. To restore self-refresh, run
-  `ALTER MATERIALIZED VIEW <mv> ADD SCHEDULE EVERY 1 DAY`.
+
+With `name_prefix` set to `""`, the bundle targets the unprefixed shared MVs
+and would drop their schedules, which is how it behaved before the prefix
+existed. Don't deploy with an empty prefix while the admin-insights app relies
+on those schedules.
+
+**Leftover table:** earlier deploys wrote an unprefixed
+`demos.admin_insights.apps_inventory_snapshot`. Nothing reads it now. It is
+left in place and is safe to drop manually:
+`DROP TABLE demos.admin_insights.apps_inventory_snapshot`.
 
 ## Flag definitions
 
@@ -135,7 +179,7 @@ The thresholds are dashboard parameters on the **Filters** page:
 That is inclusive, so it covers N full days plus today (UTC). `stale_days`
 compares the last deploy/update timestamp against `current_date() - stale_days`.
 
-"OBO" means user on-behalf-of activity in `app_obo_activity_daily`. An OBO row
+"OBO" means user on-behalf-of activity in `${name_prefix}app_obo_activity_daily`. An OBO row
 is matched to an app when the last path segment of `acting_resource` equals the
 app's `oauth2_app_client_id`, `id`, or `name`. Audit records `acting_resource`
 as `accounts/<acct>/oauth2/custom-app-integrations/<oauth2_app_client_id>`.
