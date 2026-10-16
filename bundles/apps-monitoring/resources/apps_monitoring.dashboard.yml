@@ -33,8 +33,33 @@ resources:
                 "    count(DISTINCT CASE WHEN o.activity_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN o.user_email END) AS obo_users_window\n",
                 "  FROM snap s\n",
                 "  INNER JOIN ${var.name_prefix}app_obo_activity_daily o\n",
-                "    ON o.workspace_id = s.workspace_id\n",
-                "    AND regexp_extract(o.acting_resource, '([^/]+)$', 1) IN (s.oauth2_app_client_id, s.app_id, s.app_name)\n",
+                "    ON o.oauth2_app_client_id = s.oauth2_app_client_id\n",
+                "    AND o.user_email LIKE '%@%'\n",
+                "    AND o.user_email IS DISTINCT FROM s.service_principal_client_id\n",
+                "  GROUP BY s.app_name\n",
+                "),\n",
+                "logins AS (\n",
+                "  SELECT\n",
+                "    s.app_name,\n",
+                "    max(a.activity_date) AS last_login_date,\n",
+                "    count(DISTINCT CASE WHEN a.activity_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN a.user_email END) AS login_users_window\n",
+                "  FROM snap s\n",
+                "  INNER JOIN ${var.name_prefix}app_access_activity_daily a\n",
+                "    ON a.signal = 'login'\n",
+                "    AND a.oauth2_app_client_id = s.oauth2_app_client_id\n",
+                "    AND a.user_email LIKE '%@%'\n",
+                "    AND a.user_email IS DISTINCT FROM s.service_principal_client_id\n",
+                "  GROUP BY s.app_name\n",
+                "),\n",
+                "sp AS (\n",
+                "  SELECT\n",
+                "    s.app_name,\n",
+                "    max(a.activity_date) AS last_sp_activity_date,\n",
+                "    coalesce(sum(CASE WHEN a.activity_date >= date_sub(current_date(), least(greatest(:usage_days, 1), 90)) THEN a.event_count END), 0) AS sp_events_window\n",
+                "  FROM snap s\n",
+                "  INNER JOIN ${var.name_prefix}app_access_activity_daily a\n",
+                "    ON a.signal = 'sp_activity'\n",
+                "    AND a.user_email = s.service_principal_client_id\n",
                 "  GROUP BY s.app_name\n",
                 "),\n",
                 "billed AS (\n",
@@ -68,15 +93,26 @@ resources:
                 "      coalesce(s.update_time, s.create_time)\n",
                 "    ) AS last_change_time,\n",
                 "    array_join(s.user_api_scopes, ', ') AS user_api_scopes,\n",
+                "    l.last_login_date,\n",
+                "    coalesce(l.login_users_window, 0) AS human_login_users,\n",
+                "    coalesce(l.login_users_window, 0) > 0 AS has_human_login,\n",
                 "    o.last_obo_date,\n",
-                "    coalesce(o.obo_users_window, 0) AS obo_users_window,\n",
-                "    coalesce(o.obo_events_window, 0) AS obo_events_window,\n",
+                "    coalesce(o.obo_users_window, 0) AS human_obo_users,\n",
+                "    coalesce(o.obo_events_window, 0) AS human_obo_events,\n",
+                "    p.last_sp_activity_date,\n",
+                "    coalesce(p.sp_events_window, 0) AS sp_events_window,\n",
+                "    CASE\n",
+                "      WHEN coalesce(p.sp_events_window, 0) > 0 AND coalesce(o.obo_events_window, 0) > 0 THEN 'SP and OBO'\n",
+                "      WHEN coalesce(p.sp_events_window, 0) > 0 THEN 'SP-only'\n",
+                "      WHEN coalesce(o.obo_events_window, 0) > 0 THEN 'OBO'\n",
+                "      ELSE 'Idle'\n",
+                "    END AS activity_type,\n",
                 "    coalesce(b.dbus_window, 0) AS dbus_window,\n",
                 "    b.last_billed_date,\n",
                 "    s.url,\n",
                 "    s.snapshot_time,\n",
-                "    CASE WHEN coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_usage,\n",
-                "    CASE WHEN coalesce(b.dbus_window, 0) > 0 AND coalesce(o.obo_users_window, 0) = 0 THEN 1 ELSE 0 END AS flag_billed_no_users,\n",
+                "    CASE WHEN coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_no_usage,\n",
+                "    CASE WHEN coalesce(b.dbus_window, 0) > 0 AND coalesce(l.login_users_window, 0) = 0 AND coalesce(o.obo_users_window, 0) = 0 THEN 1 ELSE 0 END AS flag_billed_no_users,\n",
                 "    CASE WHEN s.user_api_scopes IS NOT NULL AND size(s.user_api_scopes) = 0 AND coalesce(o.obo_events_window, 0) = 0 THEN 1 ELSE 0 END AS flag_sp_only,\n",
                 "    CASE WHEN coalesce(size(s.user_api_scopes) > 0, false) THEN 1 ELSE 0 END AS has_user_scopes,\n",
                 "    CASE WHEN s.user_api_scopes IS NULL THEN 1 ELSE 0 END AS flag_scopes_unknown,\n",
@@ -91,6 +127,8 @@ resources:
                 "  FROM snap s\n",
                 "  LEFT JOIN creator_counts c ON c.creator <=> s.creator\n",
                 "  LEFT JOIN obo o ON o.app_name = s.app_name\n",
+                "  LEFT JOIN logins l ON l.app_name = s.app_name\n",
+                "  LEFT JOIN sp p ON p.app_name = s.app_name\n",
                 "  LEFT JOIN billed b ON b.app_id = s.app_id\n",
                 ")\n",
                 "SELECT\n",
@@ -99,6 +137,7 @@ resources:
                 "    CASE WHEN flag_no_usage = 1 THEN 'no_usage' END,\n",
                 "    CASE WHEN flag_billed_no_users = 1 THEN 'billed_no_users' END,\n",
                 "    CASE WHEN flag_sp_only = 1 THEN 'sp_only' END,\n",
+                "    CASE WHEN flag_no_usage = 1 AND activity_type = 'Idle' THEN 'idle' END,\n",
                 "    CASE WHEN flag_stopped_or_never_deployed = 1 THEN 'stopped_or_never_deployed' END,\n",
                 "    CASE WHEN flag_stale_deploy = 1 THEN 'stale_deploy' END,\n",
                 "    CASE WHEN flag_creator_inactive = 1 THEN 'creator_inactive' END,\n",
@@ -108,12 +147,12 @@ resources:
                 "  ) AS reasons,\n",
                 "  CASE\n",
                 "    WHEN flag_no_usage = 1\n",
-                "      AND (has_user_scopes = 1 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
+                "      AND (has_user_scopes = 1 OR activity_type = 'Idle' OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
                 "      THEN 1 ELSE 0\n",
                 "  END AS is_deletion_candidate,\n",
                 "  CASE\n",
                 "    WHEN flag_no_usage = 1\n",
-                "      AND (has_user_scopes = 1 OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
+                "      AND (has_user_scopes = 1 OR activity_type = 'Idle' OR flag_stopped_or_never_deployed = 1 OR flag_stale_deploy = 1 OR flag_creator_inactive = 1)\n",
                 "      THEN 'Deletion candidate' ELSE 'Keep'\n",
                 "  END AS candidate_label,\n",
                 "  CASE WHEN flag_billed_no_users = 1 THEN dbus_window ELSE 0 END AS wasted_dbus\n",
@@ -244,7 +283,7 @@ resources:
             },
             {
               "name": "ds_usage_trend",
-              "displayName": "Apps daily OBO usage",
+              "displayName": "Apps daily human OBO usage",
               "queryLines": [
                 "SELECT\n",
                 "  o.activity_date,\n",
@@ -253,8 +292,9 @@ resources:
                 "  count(DISTINCT s.app_name) AS apps_with_obo\n",
                 "FROM ${var.name_prefix}app_obo_activity_daily o\n",
                 "INNER JOIN ${var.name_prefix}apps_inventory_snapshot s\n",
-                "  ON o.workspace_id = s.workspace_id\n",
-                "  AND regexp_extract(o.acting_resource, '([^/]+)$', 1) IN (s.oauth2_app_client_id, s.app_id, s.app_name)\n",
+                "  ON o.oauth2_app_client_id = s.oauth2_app_client_id\n",
+                "  AND o.user_email LIKE '%@%'\n",
+                "  AND o.user_email IS DISTINCT FROM s.service_principal_client_id\n",
                 "GROUP BY o.activity_date\n",
                 "ORDER BY o.activity_date\n"
               ]
@@ -274,7 +314,7 @@ resources:
                       "lines": [
                         "# Databricks Apps monitoring\n",
                         "\n",
-                        "What can we safely delete? Usage = user on-behalf-of (OBO) activity, not billing. Thresholds are set on the Filters page. Refreshed daily at 06:00 UTC by the apps-monitoring job.\n"
+                        "What can we safely delete? Usage = a human signing in to the app or human on-behalf-of (OBO) activity, not billing and not the app's own service principal. activity_type says how the app is active (SP-only, OBO, SP and OBO, Idle). Thresholds are set on the Filters page. Refreshed daily at 06:00 UTC by the apps-monitoring job.\n"
                       ]
                     }
                   },
@@ -357,7 +397,7 @@ resources:
                       "frame": {
                         "showTitle": true,
                         "title": "Apps with no usage",
-                        "description": "No user OBO activity in the usage window (max 90 days)",
+                        "description": "No human sign-in and no human OBO activity in the usage window (max 90 days)",
                         "showDescription": true
                       }
                     }
@@ -399,7 +439,7 @@ resources:
                       "frame": {
                         "showTitle": true,
                         "title": "Deletion candidates",
-                        "description": "No usage, plus user-facing scopes or a sign of abandonment",
+                        "description": "No usage, plus user-facing scopes, Idle activity, or a sign of abandonment",
                         "showDescription": true
                       }
                     }
@@ -491,7 +531,7 @@ resources:
                       "frame": {
                         "showTitle": true,
                         "title": "Wasted DBUs (usage window)",
-                        "description": "DBUs billed to apps with zero OBO users",
+                        "description": "DBUs billed to apps with no human sign-ins and no human OBO users",
                         "showDescription": true
                       }
                     }
@@ -677,7 +717,7 @@ resources:
                       },
                       "frame": {
                         "showTitle": true,
-                        "title": "Apps usage: daily OBO users"
+                        "title": "Apps usage: daily human OBO users"
                       }
                     }
                   },
@@ -739,7 +779,7 @@ resources:
                       },
                       "frame": {
                         "showTitle": true,
-                        "title": "Apps usage: daily OBO events"
+                        "title": "Apps usage: daily human OBO events"
                       }
                     }
                   },
@@ -765,7 +805,7 @@ resources:
                       "lines": [
                         "## Deletion candidates\n",
                         "\n",
-                        "One row per app. A deletion candidate has no user OBO activity in the usage window AND either declares user_api_scopes (built for users) or shows abandonment (stopped / never deployed, stale deploy, confirmed-inactive creator). creator_unknown and scopes_unknown are shown but never count toward deletion. Nothing is deleted automatically.\n"
+                        "One row per app. A deletion candidate has no usage in the usage window (no human sign-in and no human OBO activity) AND either declares user_api_scopes (built for users), is Idle (no app service principal activity either), or shows abandonment (stopped / never deployed, stale deploy, confirmed-inactive creator). creator_unknown and scopes_unknown are shown but never count toward deletion. Nothing is deleted automatically.\n"
                       ]
                     }
                   },
@@ -827,7 +867,7 @@ resources:
                   "position": {
                     "x": 0,
                     "y": 2,
-                    "width": 4,
+                    "width": 3,
                     "height": 2
                   }
                 },
@@ -868,9 +908,9 @@ resources:
                     }
                   },
                   "position": {
-                    "x": 4,
+                    "x": 3,
                     "y": 2,
-                    "width": 4,
+                    "width": 3,
                     "height": 2
                   }
                 },
@@ -911,9 +951,52 @@ resources:
                     }
                   },
                   "position": {
-                    "x": 8,
+                    "x": 6,
                     "y": 2,
-                    "width": 4,
+                    "width": 3,
+                    "height": 2
+                  }
+                },
+                {
+                  "widget": {
+                    "name": "dc_filter_activity_type",
+                    "queries": [
+                      {
+                        "name": "q_activity_type",
+                        "query": {
+                          "datasetName": "ds_apps",
+                          "fields": [
+                            {
+                              "name": "activity_type",
+                              "expression": "`activity_type`"
+                            }
+                          ],
+                          "disaggregated": false
+                        }
+                      }
+                    ],
+                    "spec": {
+                      "version": 2,
+                      "widgetType": "filter-multi-select",
+                      "encodings": {
+                        "fields": [
+                          {
+                            "fieldName": "activity_type",
+                            "displayName": "Activity type",
+                            "queryName": "q_activity_type"
+                          }
+                        ]
+                      },
+                      "frame": {
+                        "showTitle": true,
+                        "title": "Activity type"
+                      }
+                    }
+                  },
+                  "position": {
+                    "x": 9,
+                    "y": 2,
+                    "width": 3,
                     "height": 2
                   }
                 },
@@ -931,6 +1014,14 @@ resources:
                               "expression": "`app_name`"
                             },
                             {
+                              "name": "activity_type",
+                              "expression": "`activity_type`"
+                            },
+                            {
+                              "name": "human_login_users",
+                              "expression": "`human_login_users`"
+                            },
+                            {
                               "name": "reasons",
                               "expression": "`reasons`"
                             },
@@ -939,12 +1030,20 @@ resources:
                               "expression": "`last_billed_date`"
                             },
                             {
+                              "name": "last_login_date",
+                              "expression": "`last_login_date`"
+                            },
+                            {
                               "name": "last_obo_date",
                               "expression": "`last_obo_date`"
                             },
                             {
-                              "name": "obo_users_window",
-                              "expression": "`obo_users_window`"
+                              "name": "human_obo_users",
+                              "expression": "`human_obo_users`"
+                            },
+                            {
+                              "name": "last_sp_activity_date",
+                              "expression": "`last_sp_activity_date`"
                             },
                             {
                               "name": "dbus_window",
@@ -997,6 +1096,14 @@ resources:
                             "displayName": "App"
                           },
                           {
+                            "fieldName": "activity_type",
+                            "displayName": "Activity type"
+                          },
+                          {
+                            "fieldName": "human_login_users",
+                            "displayName": "Login users"
+                          },
+                          {
                             "fieldName": "reasons",
                             "displayName": "Reason(s)"
                           },
@@ -1005,12 +1112,20 @@ resources:
                             "displayName": "Last usage (billed)"
                           },
                           {
-                            "fieldName": "last_obo_date",
-                            "displayName": "Last OBO"
+                            "fieldName": "last_login_date",
+                            "displayName": "Last login"
                           },
                           {
-                            "fieldName": "obo_users_window",
-                            "displayName": "OBO users"
+                            "fieldName": "last_obo_date",
+                            "displayName": "Last human OBO"
+                          },
+                          {
+                            "fieldName": "human_obo_users",
+                            "displayName": "Human OBO users"
+                          },
+                          {
+                            "fieldName": "last_sp_activity_date",
+                            "displayName": "Last SP activity"
                           },
                           {
                             "fieldName": "dbus_window",
