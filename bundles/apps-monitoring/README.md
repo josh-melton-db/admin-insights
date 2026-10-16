@@ -82,7 +82,9 @@ fill those in. Only `system.billing.usage` is fully qualified.
     `effective_user_api_scopes` are then NULL (unknown), not empty.
 
   Apps deleted between `apps.list` and `apps.get` (NotFound) are skipped. Auth
-  errors, or `apps.get` failing for every app, fail the task.
+  errors fail the task, as does any run where at least one `apps.get` failed
+  and none succeeded (NotFound skips don't count as successes). Zero listed
+  apps, or only confirmed-deleted ones, writes an empty snapshot.
 
   `creator_active` comes from a SCIM lookup:
   - The creator matches a `userName` → `user`, with SCIM `active`.

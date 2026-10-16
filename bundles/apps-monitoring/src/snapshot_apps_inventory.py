@@ -24,7 +24,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 SCHEMA = StructType(
@@ -133,7 +133,7 @@ def main():
     parser.add_argument("--schema", required=True)
     args = parser.parse_args()
     for value in (args.catalog, args.schema):
-        if not IDENTIFIER_RE.match(value):
+        if not IDENTIFIER_RE.fullmatch(value):
             raise ValueError(f"catalog and schema must match ^[A-Za-z0-9_]+$, got {value!r}")
 
     w = WorkspaceClient()
@@ -143,6 +143,7 @@ def main():
 
     rows = []
     listed_count = 0
+    successful_gets = 0
     failed_gets = 0
     for listed in w.apps.list():
         listed_count += 1
@@ -163,6 +164,8 @@ def main():
             app = listed
             metadata_incomplete = True
             failed_gets += 1
+        else:
+            successful_gets += 1
         creator_type, creator_active = classify_creator(w, getattr(app, "creator", None), creator_cache)
         app_status = getattr(app, "app_status", None)
         compute_status = getattr(app, "compute_status", None)
@@ -206,8 +209,14 @@ def main():
             )
         )
 
-    if failed_gets and failed_gets == listed_count:
-        raise RuntimeError(f"apps.get failed for all {listed_count} apps; treating as a workspace-wide error")
+    # Abort when no apps.get succeeded and at least one failed (NotFound skips
+    # don't count as successes). Zero listed apps, or only confirmed-deleted
+    # apps, still writes an empty snapshot.
+    if failed_gets and not successful_gets:
+        raise RuntimeError(
+            f"apps.get failed for {failed_gets} of {listed_count} listed apps with no successful gets; "
+            "treating as a workspace-wide error"
+        )
 
     table = f"`{args.catalog}`.`{args.schema}`.apps_inventory_snapshot"
     spark = SparkSession.builder.getOrCreate()

@@ -56,6 +56,19 @@ def test_all_gets_failing_is_workspace_wide():
     with pytest.raises(RuntimeError):
         run(InternalError("boom"), [app("a"), app("b")])
 
+def test_notfound_plus_error_with_no_successful_gets_aborts():
+    def get(name):
+        if name == "gone": raise NotFound("x")
+        raise InternalError("boom")
+    with pytest.raises(RuntimeError):
+        run(get, [app("gone"), app("flaky")])
+
+def test_zero_listed_apps_writes_empty_snapshot():
+    assert run(lambda name: app(name), []) == []
+
+def test_only_notfound_writes_empty_snapshot():
+    assert run(NotFound("x"), [app("a"), app("b")]) == []
+
 def test_unknown_creator_is_null_not_inactive():
     rows = run(lambda name: app(name, creator="someone"), [app("a", creator="someone")], users=[])
     assert rows[0]["creator_type"] == "unknown" and rows[0]["creator_active"] is None
@@ -64,7 +77,7 @@ def test_missing_email_creator_is_inactive_user():
     rows = run(lambda name: app(name), [app("a")], users=[])
     assert rows[0]["creator_type"] == "user" and rows[0]["creator_active"] is False
 
-@pytest.mark.parametrize("bad", ["demos`; DROP", "a.b", "", "x-y"])
+@pytest.mark.parametrize("bad", ["demos`; DROP", "a.b", "", "x-y", "demos\n"])
 def test_bad_identifier_fails_fast(bad):
     with pytest.raises(ValueError):
         run(lambda name: app(name), [app("a")], argv=("--catalog", bad, "--schema", "s"))
