@@ -118,17 +118,52 @@ def test_prefix_defaults_to_empty():
         "`demos`.`admin_insights`.apps_inventory_snapshot")
 
 
-@pytest.mark.parametrize("version", ["0.49.0", "0.67.0", "0.122.0", "1.0.0"])
+FLOOR_ERROR = r"databricks-sdk>=0\.49\.0.*environment_version"
+
+
+@pytest.mark.parametrize("version", ["0.49.0", "0.49.0.post1", "0.49.post2", "0.49.0.post1.dev1",
+                                     "0.49.0+local", "0.67.0", "0.122.0",
+                                     "1.0.0", "1.0.0rc1"])
 def test_sdk_version_at_floor_or_newer_passes(version):
-    m.check_sdk_version(version)
+    assert m.check_sdk_version(version) == version
 
 
-@pytest.mark.parametrize("version", ["0.40.0", "0.48.9"])
+@pytest.mark.parametrize("version", ["0.40.0", "0.48.9", "0.48.9.post1", "0.49.0.dev1", "0.49.0rc1", "0.49.0a1",
+                                     "0.49.0b2", "0.49.0.rc1", "0.49.0-beta.1"])
 def test_sdk_version_below_floor_fails_naming_environment_version(version):
-    with pytest.raises(RuntimeError, match=r"databricks-sdk>=0\.49\.0.*environment_version"):
+    with pytest.raises(RuntimeError, match=FLOOR_ERROR):
         m.check_sdk_version(version)
 
 
+@pytest.mark.parametrize("version", ["", "unknown", "abc.def", "0.49.0garbage", None, 49])
+def test_unparseable_sdk_version_fails_with_diagnostic(version):
+    with mock.patch.object(m, "installed_sdk_version", return_value=version), \
+         pytest.raises(RuntimeError, match=FLOOR_ERROR):
+        m.check_sdk_version()
+
+
+def test_installed_sdk_version_prefers_distribution_metadata():
+    with mock.patch.object(m.importlib.metadata, "version", return_value="0.67.0") as v:
+        assert m.check_sdk_version() == "0.67.0"
+    v.assert_called_once_with("databricks-sdk")
+
+
+def test_installed_sdk_version_falls_back_to_module_version():
+    from databricks.sdk.version import __version__
+    with mock.patch.object(m.importlib.metadata, "version", side_effect=m.importlib.metadata.PackageNotFoundError):
+        assert m.installed_sdk_version() == __version__
+
+
+def test_unavailable_sdk_version_fails_with_diagnostic():
+    with mock.patch.object(m.importlib.metadata, "version", side_effect=m.importlib.metadata.PackageNotFoundError), \
+         mock.patch.dict(sys.modules, {"databricks.sdk.version": None}):
+        assert m.installed_sdk_version() is None
+        with pytest.raises(RuntimeError,
+                           match=r"databricks-sdk>=0\.49\.0 is required, found unknown\..*environment_version"):
+            m.check_sdk_version()
+
+
 def test_main_checks_installed_sdk_version_first():
-    with mock.patch.object(m, "SDK_VERSION", "0.40.0"), pytest.raises(RuntimeError, match="0.40.0"):
+    with mock.patch.object(m, "installed_sdk_version", return_value="0.40.0"), \
+         pytest.raises(RuntimeError, match="0.40.0"):
         run(lambda name: app(name), [app("a")])
