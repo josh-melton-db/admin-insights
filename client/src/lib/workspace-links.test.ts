@@ -27,11 +27,11 @@ describe('workspace links', () => {
     expect(appDetailsUrl(host, 'admin-insights')).toBe(
       'https://fe-example.cloud.databricks.com/apps-v2/app/admin-insights/insights',
     );
-    expect(appDetailsUrl(host, 'logistics-control-center', '860013386775689')).toBe(
-      'https://fe-example.cloud.databricks.com/apps-v2/app/logistics-control-center/insights?o=860013386775689',
+    expect(appDetailsUrl(host, 'logistics-control-center', '1234567890123456')).toBe(
+      'https://fe-example.cloud.databricks.com/apps-v2/app/logistics-control-center/insights?o=1234567890123456',
     );
-    expect(workspaceResourceUrl(host, 'app', 'logistics-control-center', '860013386775689')).toBe(
-      'https://fe-example.cloud.databricks.com/apps-v2/app/logistics-control-center/insights?o=860013386775689',
+    expect(workspaceResourceUrl(host, 'app', 'logistics-control-center', '1234567890123456')).toBe(
+      'https://fe-example.cloud.databricks.com/apps-v2/app/logistics-control-center/insights?o=1234567890123456',
     );
     expect(parseTableFullName('demos.admin_insights.facts')).toEqual({
       catalog: 'demos',
@@ -47,21 +47,21 @@ describe('workspace links', () => {
     expect(tableUrlFromFullName(host, 'demos.admin_insights.facts')).toBe(
       'https://fe-example.cloud.databricks.com/explore/data/demos/admin_insights/facts',
     );
-    expect(genieSpaceUrl(host, '01f197ea720314d69ca96ed152d44b8e', '860013386775689')).toBe(
-      'https://fe-example.cloud.databricks.com/genie/rooms/01f197ea720314d69ca96ed152d44b8e?o=860013386775689',
+    expect(genieSpaceUrl(host, '01f0000000000000000000000000abcd', '1234567890123456')).toBe(
+      'https://fe-example.cloud.databricks.com/genie/rooms/01f0000000000000000000000000abcd?o=1234567890123456',
     );
-    expect(workspaceResourceUrl(host, 'genie_space', '01f197ea720314d69ca96ed152d44b8e', '860013386775689')).toBe(
-      'https://fe-example.cloud.databricks.com/genie/rooms/01f197ea720314d69ca96ed152d44b8e?o=860013386775689',
+    expect(workspaceResourceUrl(host, 'genie_space', '01f0000000000000000000000000abcd', '1234567890123456')).toBe(
+      'https://fe-example.cloud.databricks.com/genie/rooms/01f0000000000000000000000000abcd?o=1234567890123456',
     );
     expect(genieSpaceUrl(host, 'abc-space')).toBe(
       'https://fe-example.cloud.databricks.com/genie/rooms/abc-space',
     );
     expect(genieSpaceUrl(host, 'unknown')).toBeNull();
-    expect(clusterUrl(host, '0818-160004-t0zdz40h')).toBe(
-      'https://fe-example.cloud.databricks.com/compute/clusters/0818-160004-t0zdz40h',
+    expect(clusterUrl(host, '0101-000000-fake0000')).toBe(
+      'https://fe-example.cloud.databricks.com/compute/clusters/0101-000000-fake0000',
     );
-    expect(workspaceResourceUrl(host, 'cluster', '0818-160004-t0zdz40h')).toBe(
-      'https://fe-example.cloud.databricks.com/compute/clusters/0818-160004-t0zdz40h',
+    expect(workspaceResourceUrl(host, 'cluster', '0101-000000-fake0000')).toBe(
+      'https://fe-example.cloud.databricks.com/compute/clusters/0101-000000-fake0000',
     );
   });
 

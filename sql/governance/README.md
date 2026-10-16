@@ -11,7 +11,9 @@ live. Raw audit scans commonly take 30–120 seconds and abort AppKit SSE stream
 3. `03_admin_insights_metrics.sql` — certified metric view over the access facts.
 4. After the first app deploy, replace the placeholder in
    `04_app_service_principal_grants.template.sql` with the app service principal
-   client ID (`9e4c4663-646a-4845-8c98-444d75dca35b` for this workspace). Grant
+   client ID (`<app-service-principal-client-id>`). Find it with
+   `databricks apps get <app> --profile <name> -o json | jq -r .service_principal_client_id`
+   (the verified response field is `service_principal_client_id`). Grant
    information_schema SELECT only, plus `demos.admin_insights` so install-time
    typegen can DESCRIBE the reporting MVs.
 5. `05_admin_obo_grants.template.sql` is scoped to the `admins` group configured

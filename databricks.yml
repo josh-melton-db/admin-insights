@@ -44,11 +44,3 @@ resources:
 targets:
   default:
     default: true
-    workspace:
-      host: https://fe-vm-vdm-classic-1rkyo7.cloud.databricks.com
-
-    variables:
-      sql_warehouse_id: 2fe54b32b36329be
-      postgres_branch: projects/admin-insights/branches/production
-      postgres_database: projects/admin-insights/branches/production/databases/databricks-postgres
-      postgres_project: projects/admin-insights

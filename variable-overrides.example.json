@@ -1,0 +1,6 @@
+{
+  "sql_warehouse_id": "<sql-warehouse-id>",
+  "postgres_branch": "projects/<project>/branches/<branch>",
+  "postgres_database": "projects/<project>/branches/<branch>/databases/<database>",
+  "postgres_project": "projects/<project>"
+}

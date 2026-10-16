@@ -10,7 +10,7 @@ describe('MutationExecutor dry run', () => {
 
     const result = await executor.commit(
       { get: () => undefined },
-      'josh.melton@databricks.com',
+      'admin@example.com',
       {
         action: 'set_job_tags',
         mode: 'dry_run',
@@ -29,7 +29,7 @@ describe('MutationExecutor dry run', () => {
     expect(mutate).not.toHaveBeenCalled();
     expect(writeAuditEvent).toHaveBeenCalledOnce();
     expect(writeAuditEvent.mock.calls[0]?.[0]).toMatchObject({
-      actor: 'josh.melton@databricks.com',
+      actor: 'admin@example.com',
       action: 'set_job_tags.dry_run',
       outcome: 'info',
     });

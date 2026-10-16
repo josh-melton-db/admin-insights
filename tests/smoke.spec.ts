@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 const adminIdentity = {
   actor: {
-    email: 'josh.melton@databricks.com',
+    email: 'admin@example.com',
     displayName: 'Josh Melton',
     roles: ['admin'],
     isAdmin: true,

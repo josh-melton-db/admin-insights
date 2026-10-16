@@ -31,9 +31,9 @@ describe('IdentityResolver', () => {
   });
 
   it('treats bootstrap admins as administrators', async () => {
-    process.env.ADMIN_INSIGHTS_BOOTSTRAP_ADMINS = 'josh.melton@databricks.com';
+    process.env.ADMIN_INSIGHTS_BOOTSTRAP_ADMINS = 'admin@example.com';
     const resolver = new IdentityResolver();
-    const actor = await resolver.resolveActor(requestWithForwardedEmail('josh.melton@databricks.com'), []);
+    const actor = await resolver.resolveActor(requestWithForwardedEmail('admin@example.com'), []);
     expect(actor.isAdmin).toBe(true);
     expect(actor.isRequester).toBe(true);
   });
