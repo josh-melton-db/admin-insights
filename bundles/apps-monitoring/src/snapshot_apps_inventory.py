@@ -9,6 +9,7 @@ schema, and name prefix come from job parameters (--catalog / --schema /
 """
 
 import argparse
+import importlib.metadata
 import re
 from datetime import datetime, timezone
 
@@ -25,6 +26,19 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+# apps.list/get with oauth2_app_client_id, user_api_scopes, and
+# effective_user_api_scopes. The job installs nothing, so this is the SDK the
+# serverless environment preinstalls: 0.67.0 in environment_version 5.
+MIN_SDK_VERSION = (0, 49, 0)
+# PEP 440 release, optional pre (a/b/rc), post, dev, and local segments.
+SDK_VERSION_RE = re.compile(
+    r"v?(?P<release>\d+(?:\.\d+)*)"
+    r"(?:[-_.]?(?P<pre>a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
+    r"(?P<post>[-_.]?(?:post|rev|r)[-_.]?\d*|-\d+)?"
+    r"(?P<dev>[-_.]?dev[-_.]?\d*)?"
+    r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?",
+    re.I,
+)
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
 NAME_PREFIX_RE = re.compile(r"[A-Za-z0-9_]*")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -66,6 +80,51 @@ SCHEMA = StructType(
         StructField("effective_budget_policy_id", StringType(), True),
     ]
 )
+
+
+def installed_sdk_version():
+    try:
+        return importlib.metadata.version("databricks-sdk")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    try:
+        from databricks.sdk.version import __version__
+    except ImportError:
+        return None
+    return __version__
+
+
+def sdk_version_at_least_floor(version):
+    """True/False against MIN_SDK_VERSION, or None if version isn't parseable.
+
+    Pre-releases (a/b/rc, or dev without post) of the floor release sort below
+    it; post-releases sort above.
+    """
+    match = SDK_VERSION_RE.fullmatch(version.strip()) if isinstance(version, str) else None
+    if not match:
+        return None
+    release = tuple(int(p) for p in match["release"].split("."))
+    width = max(len(release), len(MIN_SDK_VERSION))
+    release += (0,) * (width - len(release))
+    floor = MIN_SDK_VERSION + (0,) * (width - len(MIN_SDK_VERSION))
+    if release != floor:
+        return release > floor
+    return not (match["pre"] or (match["dev"] and not match["post"]))
+
+
+def check_sdk_version(version=None):
+    """Return the installed databricks-sdk version, or raise if it's below the floor or unknown."""
+    if version is None:
+        version = installed_sdk_version()
+    if not sdk_version_at_least_floor(version):
+        floor = ".".join(map(str, MIN_SDK_VERSION))
+        found = repr(version) if version is not None else "unknown"
+        raise RuntimeError(
+            f"databricks-sdk>={floor} is required, found {found}. Set the job's environment "
+            "environment_version to \"5\" (preinstalls 0.67.0) or at least \"4\" (0.49.0) in "
+            "resources/apps_monitoring.job.yml."
+        )
+    return version
 
 
 def parse_ts(value):
@@ -140,6 +199,8 @@ def classify_creator(w, creator, cache):
 
 
 def main():
+    sdk_version = check_sdk_version()
+    print(f"Using preinstalled databricks-sdk {sdk_version}")
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)
