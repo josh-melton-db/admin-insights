@@ -1,0 +1,26 @@
+# Standalone bundle for Databricks Apps monitoring: an inventory snapshot +
+# Apps MV refresh job and an AI/BI dashboard of deletion candidates.
+# Deploy from this directory only. The repo-root databricks.yml deploys the
+# live admin-insights app and is unrelated to this bundle.
+bundle:
+  name: apps-monitoring
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    description: Serverless SQL warehouse for the MV refresh task and dashboard.
+    default: 2fe54b32b36329be
+  catalog:
+    description: Catalog holding the Apps MVs and apps_inventory_snapshot.
+    default: demos
+  schema:
+    description: Schema holding the Apps MVs and apps_inventory_snapshot.
+    default: admin_insights
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://fe-vm-vdm-classic-1rkyo7.cloud.databricks.com

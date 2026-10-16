@@ -1,0 +1,198 @@
+"""Snapshot the workspace Databricks Apps inventory into a UC table.
+
+Writes <catalog>.<schema>.apps_inventory_snapshot (overwrite) with one row per
+app from WorkspaceClient().apps.list() / apps.get(), plus a creator-active check against
+SCIM users and service principals. Catalog and schema come from job
+parameters (--catalog / --schema), not config files.
+"""
+
+import argparse
+import re
+from datetime import datetime, timezone
+
+from databricks.sdk import WorkspaceClient
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    ArrayType,
+    BooleanType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+SCHEMA = StructType(
+    [
+        StructField("snapshot_time", TimestampType(), False),
+        StructField("workspace_id", StringType(), True),
+        StructField("app_name", StringType(), False),
+        StructField("app_id", StringType(), True),
+        StructField("description", StringType(), True),
+        StructField("creator", StringType(), True),
+        StructField("creator_type", StringType(), True),
+        StructField("creator_active", BooleanType(), True),
+        StructField("app_state", StringType(), True),
+        StructField("app_status_message", StringType(), True),
+        StructField("compute_state", StringType(), True),
+        StructField("compute_status_message", StringType(), True),
+        StructField("compute_size", StringType(), True),
+        StructField("create_time", TimestampType(), True),
+        StructField("update_time", TimestampType(), True),
+        StructField("updater", StringType(), True),
+        StructField("active_deployment_id", StringType(), True),
+        StructField("active_deployment_state", StringType(), True),
+        StructField("active_deployment_create_time", TimestampType(), True),
+        StructField("active_deployment_update_time", TimestampType(), True),
+        StructField("pending_deployment_id", StringType(), True),
+        StructField("pending_deployment_state", StringType(), True),
+        StructField("pending_deployment_create_time", TimestampType(), True),
+        StructField("service_principal_id", LongType(), True),
+        StructField("service_principal_name", StringType(), True),
+        StructField("service_principal_client_id", StringType(), True),
+        StructField("oauth2_app_client_id", StringType(), True),
+        StructField("url", StringType(), True),
+        StructField("user_api_scopes", ArrayType(StringType()), True),
+        StructField("effective_user_api_scopes", ArrayType(StringType()), True),
+        StructField("budget_policy_id", StringType(), True),
+        StructField("effective_budget_policy_id", StringType(), True),
+    ]
+)
+
+
+def parse_ts(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def enum_value(value):
+    if value is None:
+        return None
+    return getattr(value, "value", str(value))
+
+
+def deployment_fields(deployment):
+    if deployment is None:
+        return None, None, None, None
+    status = getattr(deployment, "status", None)
+    return (
+        deployment.deployment_id,
+        enum_value(getattr(status, "state", None)),
+        parse_ts(getattr(deployment, "create_time", None)),
+        parse_ts(getattr(deployment, "update_time", None)),
+    )
+
+
+def classify_creator(w, creator, cache):
+    """Return (creator_type, creator_active) for an app creator.
+
+    user: matches a SCIM userName (active flag from SCIM).
+    sp: matches a service principal applicationId or displayName.
+    Not found: email-shaped -> user, inactive (deleted); UUID-shaped -> sp,
+    inactive (deleted); otherwise unknown, inactive.
+    """
+    if not creator:
+        return "unknown", None
+    if creator in cache:
+        return cache[creator]
+    escaped = creator.replace('"', '\\"')
+    result = None
+    users = list(w.users.list(filter=f'userName eq "{escaped}"', attributes="id,userName,active"))
+    if users:
+        result = ("user", bool(users[0].active))
+    else:
+        field = "applicationId" if UUID_RE.match(creator) else "displayName"
+        sps = list(
+            w.service_principals.list(filter=f'{field} eq "{escaped}"', attributes="id,applicationId,displayName,active")
+        )
+        if sps:
+            result = ("sp", bool(sps[0].active))
+        elif "@" in creator:
+            result = ("user", False)
+        elif UUID_RE.match(creator):
+            result = ("sp", False)
+        else:
+            result = ("unknown", False)
+    cache[creator] = result
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--catalog", required=True)
+    parser.add_argument("--schema", required=True)
+    args = parser.parse_args()
+
+    w = WorkspaceClient()
+    workspace_id = str(w.get_workspace_id())
+    snapshot_time = datetime.now(timezone.utc)
+    creator_cache = {}
+
+    rows = []
+    for listed in w.apps.list():
+        # apps.list omits app_status and user_api_scopes; apps.get returns them.
+        app = w.apps.get(name=listed.name)
+        creator_type, creator_active = classify_creator(w, getattr(app, "creator", None), creator_cache)
+        app_status = getattr(app, "app_status", None)
+        compute_status = getattr(app, "compute_status", None)
+        active_id, active_state, active_created, active_updated = deployment_fields(getattr(app, "active_deployment", None))
+        pending_id, pending_state, pending_created, _ = deployment_fields(getattr(app, "pending_deployment", None))
+        rows.append(
+            (
+                snapshot_time,
+                workspace_id,
+                getattr(app, "name", None),
+                getattr(app, "id", None),
+                getattr(app, "description", None),
+                getattr(app, "creator", None),
+                creator_type,
+                creator_active,
+                enum_value(getattr(app_status, "state", None)),
+                getattr(app_status, "message", None),
+                enum_value(getattr(compute_status, "state", None)),
+                getattr(compute_status, "message", None),
+                enum_value(getattr(app, "compute_size", None)),
+                parse_ts(getattr(app, "create_time", None)),
+                parse_ts(getattr(app, "update_time", None)),
+                getattr(app, "updater", None),
+                active_id,
+                active_state,
+                active_created,
+                active_updated,
+                pending_id,
+                pending_state,
+                pending_created,
+                getattr(app, "service_principal_id", None),
+                getattr(app, "service_principal_name", None),
+                getattr(app, "service_principal_client_id", None),
+                getattr(app, "oauth2_app_client_id", None),
+                getattr(app, "url", None),
+                list(getattr(app, "user_api_scopes", None) or []),
+                list(getattr(app, "effective_user_api_scopes", None) or []),
+                getattr(app, "budget_policy_id", None),
+                getattr(app, "effective_budget_policy_id", None),
+            )
+        )
+
+    table = f"`{args.catalog}`.`{args.schema}`.apps_inventory_snapshot"
+    spark = SparkSession.builder.getOrCreate()
+    (
+        spark.createDataFrame(rows, SCHEMA)
+        .write.mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(table)
+    )
+    spark.sql(
+        f"COMMENT ON TABLE {table} IS 'Daily snapshot of Databricks Apps from the Apps API "
+        "(apps.list) with a creator-active check. Overwritten by the apps-monitoring job.'"
+    )
+    print(f"Wrote {len(rows)} apps to {table} at {snapshot_time.isoformat()}")
+
+
+if __name__ == "__main__":
+    main()
