@@ -145,20 +145,41 @@ full Lakebase project, branch, and database resource names. `.databricks/` is
 gitignored; do not commit your overrides. For other targets, use that target's
 directory instead of `default`.
 
-Before deploying, set `ADMIN_INSIGHTS_BOOTSTRAP_ADMINS` in your local `app.yaml`
-to the intended comma-separated administrator emails (the committed
-`admin@example.com` is a placeholder, not a real administrator). Set
-`ADMIN_INSIGHTS_DEV_USER` to your development identity too, or remove that entry
-for production: it is only used when `NODE_ENV=development` and no trusted proxy
-identity header is present. Bootstrap admins are read at startup and retain their
-existing authorization semantics. Keep actual emails out of commits and restore
-the placeholders before committing. For local development, use the equivalent
-settings in your gitignored `.env` (see `.env.example`).
+The app's runtime command and environment are defined in `databricks.yml`
+(`resources.apps.app.config`), not in an `app.yaml`. Set these app settings in
+the same overrides file:
 
-**Warning:** deploying with the committed `admin@example.com` placeholder leaves
-no real bootstrap administrator. Admin access then depends solely on
-`ADMIN_INSIGHTS_ADMIN_GROUPS` membership. Set your email in `app.yaml` before
-deploying, and do not commit it.
+| Variable           | Required | Default   | App env var                       |
+| ------------------ | -------- | --------- | --------------------------------- |
+| `bootstrap_admins` | yes      | —         | `ADMIN_INSIGHTS_BOOTSTRAP_ADMINS` |
+| `admin_groups`     | no       | `admins`  | `ADMIN_INSIGHTS_ADMIN_GROUPS`     |
+| `execution_mode`   | no       | `dry_run` | `ADMIN_INSIGHTS_EXECUTION_MODE`   |
+
+- `bootstrap_admins`: comma-separated administrator emails (case-insensitive),
+  read at startup. `bundle validate` and `bundle deploy` fail if it is unset. The
+  example's `you@example.com` is a placeholder: replace it with real emails.
+- `admin_groups`: comma-separated workspace group names whose members are admins.
+- `execution_mode`: `dry_run` or `live`. Any value other than `live` behaves as
+  `dry_run`. The deployed app runs in `dry_run` by default; to enable live mode,
+  set `"execution_mode": "live"` in the overrides file.
+
+The bundle also injects `DATABRICKS_WAREHOUSE_ID` and `LAKEBASE_ENDPOINT` from
+the `sql-warehouse` and `postgres` app resources.
+
+**Check key names carefully:** the CLI ignores unknown keys in the overrides
+file without any error or warning. A misspelled `admin_groups` or
+`execution_mode` key therefore falls back silently to its default (`admins` /
+`dry_run`). A misspelled `bootstrap_admins` key fails `bundle validate` and
+`bundle deploy`, because the required variable is then unset.
+
+`ADMIN_INSIGHTS_DEV_USER` is not set on the deployed app: it is only used when
+`NODE_ENV=development` and no trusted proxy identity header is present. For local
+development, set it and the settings above in your gitignored `.env` (see
+`.env.example`).
+
+**Warning:** if `bootstrap_admins` holds only placeholder addresses, there is no
+real bootstrap administrator. Admin access then depends solely on
+`admin_groups` membership.
 
 After the first deploy, follow `sql/governance/README.md` to retrieve the app's
 `service_principal_client_id` and substitute `<app-service-principal-client-id>`
@@ -186,6 +207,9 @@ Start the deployed app:
 databricks bundle run app -t default --profile <name>
 ```
 
+Changes to the app's env or command (including the variables above) take effect
+only on a new app deployment: run `bundle run app` after `bundle deploy`.
+
 ### Deploy to Production
 
 Only the `default` target is configured in this repository. To deploy with a
@@ -210,8 +234,7 @@ databricks bundle deploy -t prod --profile <name>
 * shared/          # Shared types
 * config/          # Configuration
   * queries/       # SQL query files
-* databricks.yml   # Bundle configuration
-* app.yaml         # App configuration
+* databricks.yml   # Bundle and app runtime configuration
 * .env.example     # Environment variables example
 ```
 
