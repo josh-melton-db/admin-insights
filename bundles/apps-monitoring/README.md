@@ -82,8 +82,8 @@ Prerequisites:
   `catalog.schema` are enough.
 - An existing `catalog.schema`, on which the deployer has `USE CATALOG`,
   `USE SCHEMA`, `CREATE TABLE`, and `CREATE MATERIALIZED VIEW`.
-- PyPI is reachable from serverless jobs (the snapshot task installs
-  `databricks-sdk`).
+- Serverless environment version 5 for jobs. The job installs no packages, so
+  PyPI does not need to be reachable (see [Restricted networks](#restricted-networks)).
 
 Steps, from `bundles/apps-monitoring/`:
 
@@ -101,6 +101,26 @@ Steps, from `bundles/apps-monitoring/`:
    `databricks bundle deploy --profile <profile>`.
 4. Run the job once so the snapshot, MVs, and dashboard exist before the
    first daily run: `databricks bundle run apps_monitoring --profile <profile>`.
+
+### Restricted networks
+
+The job has no `dependencies`, so nothing is pip-installed at run time. The
+snapshot task imports only the standard library, `databricks.sdk`, and
+`pyspark`, and uses the `databricks-sdk` that serverless
+`environment_version: "5"` preinstalls (0.67.0). It needs `databricks-sdk`
+0.49.0 or newer, prints the version it uses, and fails at startup with an
+error naming `environment_version` if the SDK is older.
+
+If a workspace can't use environment 5, set `environment_version: "4"` in
+`resources/apps_monitoring.job.yml` (preinstalls 0.49.0, the minimum; versions
+2 and earlier are too old). To use a newer SDK without PyPI, add it to the
+environment's `dependencies` from a wheel in a UC volume, or point serverless
+at an internal mirror with
+[default package repositories](https://docs.databricks.com/aws/en/admin/workspace-settings/default-package-repositories).
+See [serverless environment versions](https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/)
+for the preinstalled package versions and
+[serverless dependencies](https://docs.databricks.com/aws/en/compute/serverless/dependencies)
+for volume wheels.
 
 ## Variables
 

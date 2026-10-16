@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied, Unauthenticated
+from databricks.sdk.version import __version__ as SDK_VERSION
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     ArrayType,
@@ -25,6 +26,10 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+# apps.list/get with oauth2_app_client_id, user_api_scopes, and
+# effective_user_api_scopes. The job installs nothing, so this is the SDK the
+# serverless environment preinstalls: 0.67.0 in environment_version 5.
+MIN_SDK_VERSION = (0, 49, 0)
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
 NAME_PREFIX_RE = re.compile(r"[A-Za-z0-9_]*")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -66,6 +71,17 @@ SCHEMA = StructType(
         StructField("effective_budget_policy_id", StringType(), True),
     ]
 )
+
+
+def check_sdk_version(version):
+    parts = tuple(int(p) for p in re.findall(r"\d+", version)[:3])
+    if parts < MIN_SDK_VERSION:
+        floor = ".".join(map(str, MIN_SDK_VERSION))
+        raise RuntimeError(
+            f"databricks-sdk>={floor} is required, found {version}. Set the job's environment "
+            "environment_version to \"5\" (preinstalls 0.67.0) or at least \"4\" (0.49.0) in "
+            "resources/apps_monitoring.job.yml."
+        )
 
 
 def parse_ts(value):
@@ -140,6 +156,8 @@ def classify_creator(w, creator, cache):
 
 
 def main():
+    check_sdk_version(SDK_VERSION)
+    print(f"Using preinstalled databricks-sdk {SDK_VERSION}")
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)

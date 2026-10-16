@@ -116,3 +116,19 @@ def test_prefix_defaults_to_empty():
     spark = run_main(lambda name: app(name), [app("a")])
     spark.createDataFrame.return_value.write.mode.return_value.option.return_value.saveAsTable.assert_called_once_with(
         "`demos`.`admin_insights`.apps_inventory_snapshot")
+
+
+@pytest.mark.parametrize("version", ["0.49.0", "0.67.0", "0.122.0", "1.0.0"])
+def test_sdk_version_at_floor_or_newer_passes(version):
+    m.check_sdk_version(version)
+
+
+@pytest.mark.parametrize("version", ["0.40.0", "0.48.9"])
+def test_sdk_version_below_floor_fails_naming_environment_version(version):
+    with pytest.raises(RuntimeError, match=r"databricks-sdk>=0\.49\.0.*environment_version"):
+        m.check_sdk_version(version)
+
+
+def test_main_checks_installed_sdk_version_first():
+    with mock.patch.object(m, "SDK_VERSION", "0.40.0"), pytest.raises(RuntimeError, match="0.40.0"):
+        run(lambda name: app(name), [app("a")])

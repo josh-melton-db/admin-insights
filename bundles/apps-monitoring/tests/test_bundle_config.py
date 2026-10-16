@@ -261,3 +261,12 @@ def test_dashboard_has_activity_type_filter_and_login_column():
 def test_shared_mvs_self_refresh_daily_again():
     shared_sql = sql_code(REPO / "sql/governance/06_app_activity_daily_mvs.sql")
     assert shared_sql.count("SCHEDULE EVERY 1 DAY") == 2
+
+
+def test_snapshot_job_has_no_pip_dependencies():
+    # Serverless env 5 preinstalls databricks-sdk 0.67.0, so the job installs
+    # nothing and runs where PyPI is unreachable.
+    job = load("resources/apps_monitoring.job.yml")["resources"]["jobs"]["apps_monitoring"]
+    for env in job["environments"]:
+        assert env["spec"]["environment_version"] == "5"
+        assert "dependencies" not in env["spec"]
