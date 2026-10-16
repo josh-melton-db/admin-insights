@@ -5,6 +5,14 @@
 -- vector_search_no_index = VECTOR_SEARCH usage rows with no index_id.
 -- Agent Bricks ka-% / mas-% Vector Search endpoints are excluded from that band.
 -- app_no_user_obo = APPS billing with zero user-authorization (OBO) events.
+-- OBO rows match an app on oauth2_app_client_id, never on workspace (most OBO
+-- rows have workspace_id 0). Billing app_id maps to oauth2_app_client_id through
+-- demos.admin_insights.monitor_apps_inventory_snapshot, written by the
+-- apps-monitoring bundle (bundles/apps-monitoring) with its default monitor_
+-- name prefix for that bundle's workspace only. Apps missing from it are
+-- app_obo_unmapped (OBO unknown) and are not counted as waste. OBO by the app's
+-- own service principal (user_email not email-shaped or equal to its
+-- service_principal_client_id) is not user activity.
 -- @param startDate DATE
 -- @param endDate DATE
 -- @param workspaceScope STRING
@@ -123,14 +131,26 @@ serving_with_requests AS (
   WHERE DATE(u.request_time) >= CAST(:startDate AS DATE)
     AND DATE(u.request_time) <= CAST(:endDate AS DATE)
 ),
-apps_with_obo AS (
+app_map AS (
   SELECT DISTINCT
     workspace_id,
-    acting_resource
-  FROM demos.admin_insights.app_obo_activity_daily
-  WHERE activity_date >= CAST(:startDate AS DATE)
-    AND activity_date <= CAST(:endDate AS DATE)
-    AND (:workspaceScope = 'all' OR workspace_id = :workspaceId)
+    app_id,
+    oauth2_app_client_id,
+    service_principal_client_id
+  FROM demos.admin_insights.monitor_apps_inventory_snapshot
+  WHERE oauth2_app_client_id IS NOT NULL
+),
+apps_with_obo AS (
+  SELECT DISTINCT
+    m.workspace_id,
+    m.app_id
+  FROM app_map m
+  INNER JOIN demos.admin_insights.app_obo_activity_daily o
+    ON o.oauth2_app_client_id = m.oauth2_app_client_id
+    AND o.user_email LIKE '%@%'
+    AND o.user_email IS DISTINCT FROM m.service_principal_client_id
+  WHERE o.activity_date >= CAST(:startDate AS DATE)
+    AND o.activity_date <= CAST(:endDate AS DATE)
 ),
 classified AS (
   SELECT
@@ -151,9 +171,17 @@ classified AS (
       WHEN p.product = 'APPS'
         AND NOT EXISTS (
           SELECT 1
-          FROM apps_with_obo o
-          WHERE o.workspace_id = p.workspace_id
-            AND o.acting_resource IN (p.app_id, p.app_name)
+          FROM app_map m
+          WHERE m.workspace_id = p.workspace_id
+            AND m.app_id = p.app_id
+        )
+        THEN 'app_obo_unmapped'
+      WHEN p.product = 'APPS'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM apps_with_obo a
+          WHERE a.workspace_id = p.workspace_id
+            AND a.app_id = p.app_id
         )
         THEN 'app_no_user_obo'
       ELSE NULL
@@ -181,7 +209,7 @@ SELECT
   coalesce(sum(CASE WHEN waste_kind = 'idle_serving_scale_to_zero' THEN list_cost END), 0) AS idle_scale_to_zero_serving_spend,
   coalesce(sum(CASE WHEN waste_kind = 'vector_search_no_index' THEN list_cost END), 0) AS vector_search_no_index_spend,
   coalesce(sum(CASE WHEN waste_kind = 'app_no_user_obo' THEN list_cost END), 0) AS app_no_user_obo_spend,
-  coalesce(sum(CASE WHEN waste_kind IS NOT NULL THEN list_cost END), 0) AS wasted_spend
+  coalesce(sum(CASE WHEN waste_kind IS NOT NULL AND waste_kind <> 'app_obo_unmapped' THEN list_cost END), 0) AS wasted_spend
 FROM classified
 GROUP BY usage_date
 ORDER BY usage_date;
