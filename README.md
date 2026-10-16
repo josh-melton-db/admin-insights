@@ -155,6 +155,11 @@ existing authorization semantics. Keep actual emails out of commits and restore
 the placeholders before committing. For local development, use the equivalent
 settings in your gitignored `.env` (see `.env.example`).
 
+**Warning:** deploying with the committed `admin@example.com` placeholder leaves
+no real bootstrap administrator. Admin access then depends solely on
+`ADMIN_INSIGHTS_ADMIN_GROUPS` membership. Set your email in `app.yaml` before
+deploying, and do not commit it.
+
 After the first deploy, follow `sql/governance/README.md` to retrieve the app's
 `service_principal_client_id` and substitute `<app-service-principal-client-id>`
 in a local copy of the grants template. Do not commit the substituted ID.
@@ -183,8 +188,11 @@ databricks bundle run app -t default --profile <name>
 
 ### Deploy to Production
 
-1. Configure the production target in `databricks.yml`
-2. Deploy to production:
+Only the `default` target is configured in this repository. To deploy with a
+separate `prod` target, first add it to `databricks.yml` and create its own
+gitignored `.databricks/bundle/prod/variable-overrides.json` using
+`variable-overrides.example.json`. Select the production workspace profile and
+set the production resource values before deploying:
 
 ```bash
 databricks bundle deploy -t prod --profile <name>

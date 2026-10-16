@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 const adminIdentity = {
   actor: {
     email: 'admin@example.com',
-    displayName: 'Josh Melton',
+    displayName: 'Example Admin',
     roles: ['admin'],
     isAdmin: true,
     isRequester: true,
