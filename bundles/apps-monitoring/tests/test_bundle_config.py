@@ -181,8 +181,35 @@ def test_dashboard_usage_definition():
         assert tier in q
     assert "a.user_email = s.service_principal_client_id" in q
     assert "flag_no_usage" in q
-    # no_usage = no human login and no human OBO; sp_only no longer depends on OBO alone.
-    assert re.search(r"CASE WHEN coalesce\(l\.login_users_window, 0\) = 0 AND coalesce\(o\.obo_events_window, 0\) = 0 THEN 1 ELSE 0 END AS flag_no_usage", q)
+    # no_usage = no human login, no human OBO, and no SP activity: SP activity is
+    # the app doing work (often for users), so it counts as usage.
+    assert re.search(
+        r"CASE WHEN coalesce\(l\.login_users_window, 0\) = 0 AND coalesce\(o\.obo_events_window, 0\) = 0"
+        r" AND coalesce\(p\.sp_events_window, 0\) = 0 THEN 1 ELSE 0 END AS flag_no_usage", q)
+    assert re.search(
+        r"CASE WHEN coalesce\(l\.login_users_window, 0\) = 0 AND coalesce\(o\.obo_events_window, 0\) = 0"
+        r" THEN 1 ELSE 0 END AS flag_no_human_usage", q)
+
+
+def test_deletion_candidate_is_no_usage_only():
+    q = _query("ds_apps")
+    # Candidacy and wasted DBUs depend on no_usage alone; the other flags are informational.
+    assert "CASE WHEN flag_no_usage = 1 THEN 1 ELSE 0 END AS is_deletion_candidate" in q
+    assert "CASE WHEN flag_no_usage = 1 THEN 'Deletion candidate' ELSE 'Keep' END AS candidate_label" in q
+    assert "CASE WHEN flag_no_usage = 1 THEN dbus_window ELSE 0 END AS wasted_dbus" in q
+    final = q[q.rindex("FROM facts") - 2000:]
+    for flag in ("has_user_scopes = 1", "flag_stopped_or_never_deployed = 1 OR", "flag_stale_deploy = 1 OR",
+                 "flag_creator_inactive = 1)", "activity_type = 'Idle'"):
+        assert flag not in final, flag
+
+
+def test_dashboard_text_counts_sp_activity_as_usage():
+    serialized = load("resources/apps_monitoring.dashboard.yml")["resources"]["dashboards"][
+        "apps_monitoring_dashboard"]["serialized_dashboard"]
+    readme = (BUNDLE / "README.md").read_text()
+    for text in (serialized, readme):
+        assert "background or operational" not in text
+        assert "SP activity" in text
 
 
 def test_dashboard_has_activity_type_filter_and_login_column():
