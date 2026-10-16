@@ -160,11 +160,17 @@ the same overrides file:
   example's `you@example.com` is a placeholder: replace it with real emails.
 - `admin_groups`: comma-separated workspace group names whose members are admins.
 - `execution_mode`: `dry_run` or `live`. Any value other than `live` behaves as
-  `dry_run`.
+  `dry_run`. The deployed app runs in `dry_run` by default; to enable live mode,
+  set `"execution_mode": "live"` in the overrides file.
 
 The bundle also injects `DATABRICKS_WAREHOUSE_ID` and `LAKEBASE_ENDPOINT` from
-the `sql-warehouse` and `postgres` app resources. Unknown keys in the overrides
-file are ignored silently, so check variable names carefully.
+the `sql-warehouse` and `postgres` app resources.
+
+**Check key names carefully:** the CLI ignores unknown keys in the overrides
+file without any error or warning. A misspelled `admin_groups` or
+`execution_mode` key therefore falls back silently to its default (`admins` /
+`dry_run`). A misspelled `bootstrap_admins` key fails `bundle validate` and
+`bundle deploy`, because the required variable is then unset.
 
 `ADMIN_INSIGHTS_DEV_USER` is not set on the deployed app: it is only used when
 `NODE_ENV=development` and no trusted proxy identity header is present. For local
@@ -200,6 +206,9 @@ Start the deployed app:
 ```bash
 databricks bundle run app -t default --profile <name>
 ```
+
+Changes to the app's env or command (including the variables above) take effect
+only on a new app deployment: run `bundle run app` after `bundle deploy`.
 
 ### Deploy to Production
 
