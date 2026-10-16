@@ -1,0 +1,9 @@
+resources:
+  dashboards:
+    apps_monitoring_dashboard:
+      display_name: Databricks Apps monitoring
+      file_path: ../src/apps_monitoring.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+      # Dataset SQL uses bare table names; these fill in catalog/schema.
+      dataset_catalog: ${var.catalog}
+      dataset_schema: ${var.schema}

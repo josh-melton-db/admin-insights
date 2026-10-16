@@ -2,10 +2,13 @@
 -- eligible. These views use a bounded rolling 90-day daily full refresh.
 -- AppKit queries read these MVs rather than scanning audit live.
 -- Run each CREATE as its own warehouse statement.
+-- No SCHEDULE: the apps-monitoring bundle job (bundles/apps-monitoring) is the
+-- single refresher. It creates these MVs if missing, drops any schedule, and
+-- runs REFRESH MATERIALIZED VIEW daily at 06:00 UTC. Keep the definitions and
+-- columns in sync with bundles/apps-monitoring/src/refresh_app_mvs.sql.
 
 CREATE OR REPLACE MATERIALIZED VIEW demos.admin_insights.app_obo_activity_daily
-COMMENT 'Daily-refreshing Databricks Apps on-behalf-of (user authorization) facts from the last 90 days of system.access.audit. Grain: activity date, workspace, acting resource, user, service, action. acting_resource is the OAuth app ID or name from identity_metadata.'
-SCHEDULE EVERY 1 DAY
+COMMENT 'Databricks Apps on-behalf-of (user authorization) facts from the last 90 days of system.access.audit, refreshed daily by the apps-monitoring job. Grain: activity date, workspace, acting resource, user, service, action. acting_resource is the OAuth app ID or name from identity_metadata.'
 AS
 SELECT
   event_date AS activity_date,
@@ -27,8 +30,7 @@ GROUP BY
   action_name;
 
 CREATE OR REPLACE MATERIALIZED VIEW demos.admin_insights.app_config_events_daily
-COMMENT 'Daily-refreshing latest createApp/updateApp payload per app for the last 90 days. Used to flag apps that do not declare user_api_scopes (possible app-SP-only authorization).'
-SCHEDULE EVERY 1 DAY
+COMMENT 'Latest createApp/updateApp payload per app for the last 90 days, refreshed daily by the apps-monitoring job. Used to flag apps that do not declare user_api_scopes (possible app-SP-only authorization).'
 AS
 SELECT
   event_date AS activity_date,
