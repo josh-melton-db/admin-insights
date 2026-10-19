@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-
 SOURCE = Path(__file__).parents[1] / "src" / "budgets_lib.py"
 spec = importlib.util.spec_from_file_location("budgets_lib", SOURCE)
 lib = importlib.util.module_from_spec(spec)
@@ -252,14 +251,6 @@ def test_invalid_report_range(start, end):
         lib.report_query(prepared(declaration())[0], start, end, "example-account")
 
 
-def test_account_auth_no_workspace_fallback(monkeypatch):
-    monkeypatch.delenv("DATABRICKS_ACCOUNT_PROFILE", raising=False)
-    with pytest.raises(ValueError):
-        lib.account_client()
-    with pytest.raises(ValueError):
-        lib.account_client(in_runtime=True, account_id="example-account", secret_scope="", secret_key="")
-
-
 def test_account_host_allowlist():
     for host in ("https://example.cloud.databricks.com", "http://accounts.cloud.databricks.com", "https://accounts.cloud.databricks.com.evil.test"):
         with pytest.raises(ValueError):
@@ -304,58 +295,6 @@ def test_nonobject_response_is_sanitized():
     api = SimpleNamespace(api_client=SimpleNamespace(do=lambda *args, **kwargs: ["private-value"]))
     with pytest.raises(lib.BudgetError):
         lib.Client(api, "example-account").list()
-
-
-def test_runtime_secret_auth_is_explicit_and_account_only(monkeypatch):
-    import databricks.sdk
-    import databricks.sdk.core
-
-    captured = {}
-    reads = []
-
-    def config(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(**kwargs)
-
-    def secret(**kwargs):
-        reads.append(kwargs)
-        return "example-secret-token"
-
-    monkeypatch.setattr(databricks.sdk.core, "Config", config)
-    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda config: SimpleNamespace(api_client=FakeApi()))
-    result = lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
-                                secret_key="example-key", dbutils=SimpleNamespace(secrets=SimpleNamespace(get=secret)))
-    assert result.account_id == "example-account"
-    assert reads == [{"scope": "example-scope", "key": "example-key"}]
-    assert captured["auth_type"] == "pat" and captured["token"] == "example-secret-token"
-    assert "profile" not in captured
-
-
-def test_local_auth_uses_only_explicit_account_profile(monkeypatch):
-    import databricks.sdk
-    import databricks.sdk.core
-
-    captured = {}
-
-    def config(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(host="https://accounts.cloud.databricks.com", account_id=kwargs.get("account_id", "example-account"))
-
-    monkeypatch.setenv("DATABRICKS_ACCOUNT_PROFILE", "example-account-profile")
-    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "example-workspace-profile")
-    monkeypatch.setattr(databricks.sdk.core, "Config", config)
-    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda config: SimpleNamespace(api_client=FakeApi()))
-    assert lib.account_client(account_id="example-override").account_id == "example-override"
-    assert captured["profile"] == "example-account-profile"
-
-
-def test_runtime_invalid_host_does_not_read_secret():
-    reads = []
-    dbutils = SimpleNamespace(secrets=SimpleNamespace(get=lambda **kwargs: reads.append(kwargs)))
-    with pytest.raises(ValueError):
-        lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
-                           secret_key="example-key", account_host="https://example.invalid", dbutils=dbutils)
-    assert reads == []
 
 
 def test_create_failure_does_not_retry_or_print_private_details():

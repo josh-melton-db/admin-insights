@@ -2,14 +2,11 @@
 
 import copy
 import datetime as dt
-import os
 import pprint
 import re
-import secrets
 import time
 from decimal import Decimal, InvalidOperation
-from urllib.parse import parse_qs, urlparse
-
+from urllib.parse import urlparse
 
 ACCOUNT_HOSTS = {
     "accounts.cloud.databricks.com",
@@ -293,119 +290,6 @@ def validate_account_config(config):
     if not config.account_id or not ID_RE.fullmatch(config.account_id):
         raise ValueError("Set account_id or configure it in the explicitly selected account profile")
     return config
-
-
-def account_auth_mode(in_runtime, account_auth=None):
-    if not in_runtime:
-        return "profile"
-    mode = "interactive" if account_auth is None else account_auth
-    if mode not in ("interactive", "secret"):
-        raise ValueError("account_auth must be interactive or secret")
-    return mode
-
-
-def initiate_account_signin(account_host, account_id):
-    from databricks.sdk.oauth import OAuthClient, OidcEndpoints
-
-    validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
-    try:
-        endpoint_prefix = f"{account_host.rstrip('/')}/oidc/accounts/{account_id}/v1"
-        endpoints = OidcEndpoints(authorization_endpoint=f"{endpoint_prefix}/authorize",
-                                 token_endpoint=f"{endpoint_prefix}/token")
-        oauth = OAuthClient(endpoints, client_id="databricks-cli",
-                            redirect_url="http://localhost:8020", scopes=["all-apis", "offline_access"])
-        return oauth.initiate_consent()
-    except Exception:
-        raise BudgetError("Could not start account sign-in; re-run the sign-in cell (details suppressed)") from None
-
-
-def exchange_account_signin(consent, pasted):
-    instruction = "Re-run the sign-in cell, sign in, then paste the redirected URL or code into the widget."
-    if consent is None or not isinstance(pasted, str) or not pasted.strip():
-        raise ValueError("No pending consent or missing code. " + instruction)
-    expected = parse_qs(urlparse(consent.authorization_url).query).get("state", [])
-    if len(expected) != 1 or not expected[0]:
-        raise ValueError("Invalid pending consent. " + instruction)
-    value = pasted.strip()
-    if "://" in value:
-        try:
-            redirect = urlparse(value)
-            query = parse_qs(redirect.query, keep_blank_values=True)
-            valid_redirect = (redirect.scheme == "http" and redirect.hostname == "localhost" and
-                              redirect.port == 8020 and not redirect.username and not redirect.password and
-                              redirect.path in ("", "/") and not redirect.fragment)
-        except ValueError:
-            raise ValueError("Invalid redirected URL. " + instruction) from None
-        if (not valid_redirect or "error" in query or len(query.get("code", [])) != 1 or
-                not query["code"][0] or len(query.get("state", [])) != 1):
-            raise ValueError("Missing code/state or invalid redirected URL. " + instruction)
-        code, state = query["code"][0], query["state"][0]
-        if not secrets.compare_digest(state.encode(), expected[0].encode()):
-            raise ValueError("Sign-in state mismatch. " + instruction)
-    else:
-        if any(character.isspace() for character in value) or any(character in value for character in "?&#"):
-            raise ValueError("Invalid authorization code. " + instruction)
-        code, state = value, expected[0]
-    try:
-        return consent.exchange(code, state)
-    except Exception:
-        raise BudgetError("Account sign-in failed; the code may be stale or reused. " + instruction) from None
-
-
-def account_client(*, in_runtime=False, account_id="", secret_scope="", secret_key="",
-                   account_host="https://accounts.cloud.databricks.com", dbutils=None,
-                   account_auth=None, session_credentials=None):
-    """Explicit account credentials only; never use WorkspaceClient auth."""
-    from databricks.sdk import AccountClient
-    from databricks.sdk.core import Config
-
-    options = {"http_timeout_seconds": 30, "retry_timeout_seconds": 60}
-    mode = account_auth_mode(in_runtime, account_auth)
-    if mode == "interactive":
-        from databricks.sdk.credentials_provider import credentials_strategy
-
-        validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
-        if session_credentials is None:
-            raise ValueError("Complete the sign-in cell before configuring the account client")
-
-        @credentials_strategy("budget-interactive", [])
-        def session_provider(config):
-            validate_account_config(config)
-
-            def headers():
-                try:
-                    return {"Authorization": "Bearer " + session_credentials.token().access_token}
-                except Exception:
-                    raise BudgetError("Account session expired; re-run the sign-in cell") from None
-
-            return headers
-
-        try:
-            config = Config(host=account_host, account_id=account_id, credentials_strategy=session_provider, **options)
-        except Exception:
-            raise BudgetError("Could not configure the interactive account session") from None
-    elif mode == "secret":
-        if not all((account_id, secret_scope, secret_key, dbutils)):
-            raise ValueError("Runtime requires account_id and account-token secret scope/key")
-        validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
-        try:
-            token = dbutils.secrets.get(scope=secret_scope, key=secret_key)
-            config = Config(host=account_host, account_id=account_id, token=token, auth_type="pat", **options)
-        except Exception:
-            raise BudgetError("Could not load runtime account credential") from None
-    else:
-        profile = os.environ.get("DATABRICKS_ACCOUNT_PROFILE", "").strip()
-        if not profile:
-            raise ValueError("Set DATABRICKS_ACCOUNT_PROFILE to an explicit account-level CLI profile")
-        try:
-            config = Config(profile=profile, **({"account_id": account_id} if account_id else {}), **options)
-        except Exception:
-            raise BudgetError("Could not load the selected account profile") from None
-    validate_account_config(config)
-    try:
-        return Client(AccountClient(config=config), config.account_id)
-    except Exception:
-        raise BudgetError("Could not initialize account client") from None
 
 
 class Client:

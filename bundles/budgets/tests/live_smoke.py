@@ -28,7 +28,11 @@ def main():
     workspace = WorkspaceClient(profile="DEFAULT")
     workspace_id = int(workspace.get_workspace_id())
     assert workspace_id > 0
-    client = lib.account_client()
+    from databricks.sdk import AccountClient
+
+    account = AccountClient(profile="budget-account-test")
+    lib.validate_account_config(account.config)
+    client = lib.Client(account, account.config.account_id)
     statuses = collections.Counter()
     phase = ["read_only"]
 

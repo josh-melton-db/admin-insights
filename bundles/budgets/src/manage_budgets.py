@@ -1,19 +1,4 @@
-# Databricks notebook source
-# MAGIC %pip install --upgrade databricks-sdk
-
-# COMMAND ----------
-
-# MAGIC %restart_python
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Account budgets as code
-# MAGIC Edit declarations, then run all. `apply=false` is GET-only for budget calls.
-# MAGIC Account-host credentials are required; workspace credentials are used only for reporting.
-# MAGIC See README.md before adopting or deleting a budget. Import output contains private configuration.
-
-# COMMAND ----------
+"""Plan account budgets locally; mutations require --apply."""
 
 BUDGETS = [
     {
@@ -27,154 +12,146 @@ BUDGETS = [
 ]
 MANAGED_BUDGET_IDS: list[str] = []
 
-# COMMAND ----------
-
+import argparse
 import datetime as dt
-
-dbutils.widgets.dropdown("apply", "false", ["false", "true"])
-dbutils.widgets.dropdown("allow_deletes", "false", ["false", "true"])
-dbutils.widgets.text("account_id", "")
-dbutils.widgets.text("account_host", "https://accounts.cloud.databricks.com")
-dbutils.widgets.dropdown("account_auth", "interactive", ["interactive", "secret"])
-dbutils.widgets.text("account_signin_redirect", "")
-dbutils.widgets.text("account_token_secret_scope", "")
-dbutils.widgets.text("account_token_secret_key", "")
-dbutils.widgets.text("report_start_date", (dt.date.today() - dt.timedelta(days=30)).isoformat())
-dbutils.widgets.text("report_end_date", dt.date.today().isoformat())
-APPLY = dbutils.widgets.get("apply") == "true"
-ALLOW_DELETES = dbutils.widgets.get("allow_deletes") == "true"
-
-# COMMAND ----------
-
-import os
+import shlex
 import sys
-from databricks.sdk import WorkspaceClient
+import time
 
-sys.path.insert(0, os.getcwd())
 import budgets_lib as lib
+from databricks.sdk import AccountClient, WorkspaceClient
+from databricks.sdk.service.sql import StatementParameterListItem, StatementState
 
-IN_RUNTIME = bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
-workspace = WorkspaceClient() if IN_RUNTIME else WorkspaceClient(profile="DEFAULT")
-try:
-    WORKSPACE_ID = int(workspace.get_workspace_id())
-except Exception:
-    raise RuntimeError("Could not discover current workspace ID; verify the workspace credential/context") from None
-declared, errors = lib.prepare(BUDGETS, workspace_id=WORKSPACE_ID)
-if not isinstance(MANAGED_BUDGET_IDS, list) or any(
-    not isinstance(budget_id, str) or not lib.ID_RE.fullmatch(budget_id)
-    for budget_id in MANAGED_BUDGET_IDS
-):
-    errors.append("MANAGED_BUDGET_IDS must be a list of budget IDs")
-try:
-    start_date = dt.date.fromisoformat(dbutils.widgets.get("report_start_date"))
-    end_date = dt.date.fromisoformat(dbutils.widgets.get("report_end_date"))
-    if start_date >= end_date:
-        raise ValueError
-except ValueError:
-    errors.append("Report dates must be YYYY-MM-DD with start before exclusive end")
-if errors:
-    raise ValueError("Invalid declarations:\n" + "\n".join(f"  - {error}" for error in errors))
-AUTH_MODE = lib.account_auth_mode(IN_RUNTIME, dbutils.widgets.get("account_auth"))
 
-# COMMAND ----------
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--account-profile", required=True, help="Account CLI login profile (not a workspace profile)")
+    result.add_argument("--workspace-profile", help="Workspace CLI profile for default scope and reporting")
+    result.add_argument("--workspace-id", type=int, help="Override the default workspace scope ID")
+    result.add_argument("--apply", action="store_true", help="Apply the plan (default: read-only)")
+    result.add_argument("--allow-deletes", action="store_true", help="Permit registered deletions with --apply")
+    result.add_argument("--import", dest="import_budgets", action="store_true", help="Print live declarations after planning/apply")
+    result.add_argument("--report", action="store_true", help="Print estimated list spend via a SQL warehouse")
+    result.add_argument("--warehouse-id", help="SQL warehouse for --report")
+    result.add_argument("--start-date", default=(dt.date.today() - dt.timedelta(days=30)).isoformat(), help="Inclusive ISO date (default: 30 days ago)")
+    result.add_argument("--end-date", default=dt.date.today().isoformat(), help="Exclusive ISO date (default: today)")
+    return result
 
-# MAGIC %md
-# MAGIC ## Account sign-in
-# MAGIC Run this cell to start/restart sign-in. Open the link and complete sign-in yourself.
-# MAGIC The browser will land on an expected **failed localhost page**; do not retry that page.
-# MAGIC Paste its full address (preferred, verifies returned state) or just its code into
-# MAGIC `account_signin_redirect`, then **run the next cell**, not this cell or Run all.
-# MAGIC Do not paste into notebook source or outputs. The widget is cleared on consumption;
-# MAGIC widget inputs may be retained by the platform, so never share the notebook while signing in.
-# MAGIC A code-only paste uses the pending consent state and PKCE; it cannot check returned state.
 
-# COMMAND ----------
+def login_message(profile):
+    return ("Account profile unavailable, invalid, or unauthorized. Sign in with: "
+            "databricks auth login --host https://accounts.cloud.databricks.com "
+            f"--account-id <ACCOUNT_ID> --profile {shlex.quote(profile)} "
+            "(use your cloud's accounts host if different)")
 
-from html import escape
 
-client = None
-account_consent = None
-if AUTH_MODE == "interactive":
-    dbutils.widgets.text("account_signin_redirect", "")
-    account_consent = lib.initiate_account_signin(
-        dbutils.widgets.get("account_host").strip(), dbutils.widgets.get("account_id").strip()
-    )
-    displayHTML('<a target="_blank" rel="noopener noreferrer" href="' +
-                escape(account_consent.authorization_url, quote=True) + '">Sign in to the account</a>')
-    print("After sign-in, paste the failed localhost page's address into account_signin_redirect and run the next cell.")
+def print_table(columns, rows):
+    text_rows = [["NULL" if value is None else str(value) for value in row] for row in rows]
+    widths = [max(len(name), *(len(row[index]) for row in text_rows)) if text_rows else len(name)
+              for index, name in enumerate(columns)]
+    print(" | ".join(name.ljust(width) for name, width in zip(columns, widths)))
+    print("-+-".join("-" * width for width in widths))
+    for row in text_rows:
+        print(" | ".join(value.ljust(width) for value, width in zip(row, widths)))
 
-# COMMAND ----------
 
-if AUTH_MODE == "interactive" and (account_consent is None or not dbutils.widgets.get("account_signin_redirect").strip()):
-    dbutils.notebook.exit("Waiting for account sign-in: re-run the sign-in cell if needed, open the link, paste the redirected URL or code, then run this cell and continue.")
-try:
-    client = lib.account_client(
-        in_runtime=IN_RUNTIME,
-        account_auth=AUTH_MODE,
-        account_id=dbutils.widgets.get("account_id").strip(),
-        account_host=dbutils.widgets.get("account_host").strip(),
-        secret_scope=dbutils.widgets.get("account_token_secret_scope").strip(),
-        secret_key=dbutils.widgets.get("account_token_secret_key").strip(),
-        dbutils=dbutils,
-        session_credentials=(lib.exchange_account_signin(account_consent, dbutils.widgets.get("account_signin_redirect"))
-                             if AUTH_MODE == "interactive" else None),
-    )
-except (ValueError, lib.BudgetError):
-    if AUTH_MODE != "interactive":
-        raise
-    dbutils.notebook.exit("Account authentication failed (possibly stale/reused code or state mismatch). Re-run the sign-in cell and sign in again.")
-finally:
-    account_consent = None
-    if AUTH_MODE == "interactive":
-        dbutils.widgets.remove("account_signin_redirect")
-if client is None:
-    raise RuntimeError("Complete account authentication before continuing")
-print(f"Validated {len(declared)} budgets. Account credential configured; values suppressed.")
-
-# COMMAND ----------
-
-steps = lib.build_plan(client, declared, MANAGED_BUDGET_IDS)
-for row in lib.plan_rows(steps):
-    print(row)
-if any(step["action"] == "error" for step in steps):
-    print("Plan contains errors. Those targets cannot be changed; import and explicitly adopt by ID.")
-
-# COMMAND ----------
-
-if APPLY:
-    if any(budget["name"].startswith("example-") for budget in declared):
-        raise ValueError("Replace shipped example-* declarations before applying")
-    if any(step["action"] == "error" for step in steps):
-        raise ValueError("Resolve every plan error before applying")
-    results = lib.apply_plan(client, steps, apply=True, allow_deletes=ALLOW_DELETES)
-    for result in results:
-        print({key: value for key, value in result.items() if key != "budget_id"})
-    created_ids = [result["budget_id"] for result in results if result["action"] == "create" and result["budget_id"]]
-    print(f"Created {len(created_ids)} budgets. Copy their IDs from the import cell into declarations and ownership list.")
-    if any(result["status"] in ("failed", "unconfirmed") for result in results):
-        raise RuntimeError("Some outcomes are failed/unconfirmed. Re-import before retrying; do not repeat creates blindly.")
-else:
-    print("apply=false: no budget mutations. Deletes additionally require allow_deletes=true.")
-
-# COMMAND ----------
-
-print(lib.export_budgets(client))
-
-# COMMAND ----------
-
-print("USD estimated list cost; monthly thresholds are not prorated. Partial months and missing prices are flagged.")
-for index, budget in enumerate(declared, 1):
-    for alert_index in range(len(budget.get("alerts", [None]))):
-        print(f"Budget #{index}, alert #{alert_index + 1}")
-        try:
-            query, parameters = lib.report_query(
-                budget, dbutils.widgets.get("report_start_date"), dbutils.widgets.get("report_end_date"),
-                client.account_id, alert_index=alert_index
+def report(workspace, warehouse_id, declared, start_date, end_date, account_id):
+    print("USD estimated list cost; full monthly thresholds; partial months and missing prices are flagged.")
+    for index, budget in enumerate(declared, 1):
+        for alert_index in range(len(budget.get("alerts", [None]))):
+            print(f"Budget #{index}, alert #{alert_index + 1}")
+            query, parameters = lib.report_query(budget, start_date, end_date, account_id, alert_index)
+            execution = workspace.statement_execution
+            response = execution.execute_statement(
+                warehouse_id=warehouse_id, statement=query, wait_timeout="50s",
+                parameters=[StatementParameterListItem(name=key, value=str(value))
+                            for key, value in parameters.items()],
             )
-        except ValueError as error:
-            print(f"Report limitation: {error}")
-            continue
+            deadline = time.monotonic() + 300
+            while response.status and response.status.state in (StatementState.PENDING, StatementState.RUNNING):
+                if time.monotonic() >= deadline:
+                    raise lib.BudgetError("Report timed out; inspect the warehouse query history")
+                time.sleep(1)
+                response = execution.get_statement(response.statement_id)
+            if not response.status or response.status.state != StatementState.SUCCEEDED:
+                raise lib.BudgetError("Report failed; verify warehouse access and billing-table SELECT privileges")
+            if not response.manifest or response.manifest.truncated:
+                raise lib.BudgetError("Report returned missing or truncated results")
+            columns = [column.name for column in response.manifest.schema.columns]
+            chunk = response.result
+            rows = []
+            while chunk:
+                rows.extend(chunk.data_array or [])
+                if chunk.next_chunk_index is None:
+                    break
+                chunk = execution.get_statement_result_chunk_n(response.statement_id, chunk.next_chunk_index)
+            print_table(columns, rows)
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    if args.report and not args.warehouse_id:
+        print("--report requires --warehouse-id", file=sys.stderr)
+        return 1
+    if args.report and not args.workspace_profile:
+        print("--report requires --workspace-profile", file=sys.stderr)
+        return 1
+    try:
+        workspace = None
+        workspace_id = args.workspace_id
+        if args.workspace_profile:
+            workspace = WorkspaceClient(profile=args.workspace_profile)
+            if workspace_id is None:
+                workspace_id = int(workspace.get_workspace_id())
+        declared, errors = lib.prepare(BUDGETS, workspace_id=workspace_id)
+        if (not isinstance(MANAGED_BUDGET_IDS, list) or
+                any(not isinstance(budget_id, str) or not lib.ID_RE.fullmatch(budget_id)
+                    for budget_id in MANAGED_BUDGET_IDS) or
+                len(MANAGED_BUDGET_IDS) != len(set(MANAGED_BUDGET_IDS))):
+            errors.append("MANAGED_BUDGET_IDS must be a list of unique budget IDs")
+        if args.report:
+            start, end = dt.date.fromisoformat(args.start_date), dt.date.fromisoformat(args.end_date)
+            if start >= end:
+                errors.append("Report end date must follow start date")
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
         try:
-            display(spark.sql(query, args=parameters))
+            account = AccountClient(profile=args.account_profile)
+            lib.validate_account_config(account.config)
+            client = lib.Client(account, account.config.account_id)
+            steps = lib.build_plan(client, declared, MANAGED_BUDGET_IDS)
         except Exception:
-            raise RuntimeError("Report failed: verify billing-table SELECT privileges and compatible Spark runtime; details suppressed") from None
+            print(login_message(args.account_profile), file=sys.stderr)
+            return 1
+        print(f"Validated {len(declared)} budgets.")
+        for row in lib.plan_rows(steps):
+            print(row)
+        if args.apply:
+            if any(budget["name"].startswith("example-") for budget in declared):
+                raise lib.BudgetError("Replace shipped example-* declarations before applying")
+            if any(step["action"] == "error" for step in steps):
+                raise lib.BudgetError("Resolve every plan error before applying")
+            results = lib.apply_plan(client, steps, apply=True, allow_deletes=args.allow_deletes)
+            for result in results:
+                print(result)
+            if any(result["status"] in ("failed", "unconfirmed") for result in results):
+                raise lib.BudgetError("Apply failed/unconfirmed; import before retrying, never repeat creates blindly")
+        else:
+            print("Dry run: no budget mutations. Deletes require --apply and --allow-deletes.")
+        if args.import_budgets:
+            print(lib.export_budgets(client))
+        if args.report:
+            report(workspace, args.warehouse_id, declared, args.start_date, args.end_date, client.account_id)
+        return 0
+    except lib.BudgetError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except Exception:
+        print("Operation failed; verify workspace profile, scope, report dates and permissions (details suppressed)", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
