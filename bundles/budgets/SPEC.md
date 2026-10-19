@@ -12,7 +12,7 @@ using an account-host credential. Account-wide management is an explicit admin-o
 
 - Step 0 passed on the explicitly authorized CLI profile `DEFAULT`: a one-off
   serverless environment **5** notebook GET of the account OIDC discovery endpoint
-  returned **HTTP 200**. Run `336135853517125` terminated `SUCCESS`; the temporary
+  returned **HTTP 200**. The run terminated `SUCCESS`; the temporary
   workspace notebook was deleted. No login, token exchange, or budget mutation
   was performed. No dependencies were installed on serverless.
 - Discovery advertises `authorization_code`, `refresh_token`, `client_credentials`,
@@ -22,15 +22,34 @@ using an account-host credential. Account-wide management is an explicit admin-o
   application is recommended by Databricks for non-built-in tools. Background
   exploration verified authorize accepts the redirect without completing login;
   this change does not claim a completed human sign-in.
-- `inspect.signature` verified the following **identical** signatures locally
-  (`databricks-sdk==0.114.0`) and inside the Step 0 serverless run
-  (preinstalled `databricks-sdk==0.67.0`):
+- Source inspection of `databricks.sdk.oauth` in **0.154.0** (isolated test
+  environment), locally installed **0.114.0**, and the **0.67.0** wheel confirms
+  that `OAuthClient.from_host` takes no account ID and constructs `Config` with
+  only the host. Identical helper signatures do **not** establish account-host
+  compatibility: 0.114.0 requires an account ID for account endpoints; 0.67.0
+  selects generic `/oidc/v1/*` endpoints without it. The notebook instead uses
+  explicit `OidcEndpoints` for `{host}/oidc/accounts/{account_id}/v1/authorize`
+  and `/token`, after validating host/account ID. No discovery call is needed.
+  The shared constructor arguments are:
 
   ```python
-  OAuthClient.from_host(host: str, client_id: str, redirect_url: str, *, scopes: List[str] = None, client_secret: str = None) -> 'OAuthClient'
+  OAuthClient(oidc_endpoints, redirect_url, client_id, scopes=None, client_secret=None)
   OAuthClient.initiate_consent(self) -> databricks.sdk.oauth.Consent
   Consent.exchange(self, code: str, state: str) -> databricks.sdk.oauth.SessionCredentials
   ```
+
+- 0.154.0 adds an optional `group_id=None` constructor argument; this flow does
+  not use it. The real SDK authorization URL test checks the account-scoped
+  prefix, public client, redirect, scopes and PKCE S256 without a network call.
+  The notebook now upgrades the SDK in its first `%pip` cell and runs a separate
+  `%restart_python` cell before imports/widgets/declarations. The user-confirmed
+  runtime version and isolated test version are **0.154.0** (2026-10-19).
+- The upstream v0.154.0 release notes contain no budget or account OAuth changes.
+  Its `billing.BudgetsAPI` still sends account-host requests to
+  `/api/2.1/accounts/{account_id}/budgets`; workspace-admin access does not switch
+  these calls to workspace credentials. This is source verification, not a new
+  live permissions test. The newer SDK includes budget `resource_type`,
+  `scope_type` and `principal_overrides` fields already handled by this library.
 
 - `Consent.authorization_url` carries the state; `Consent.exchange` checks state
   and exchanges using its in-memory PKCE verifier. The notebook also checks URL
@@ -45,6 +64,10 @@ using an account-host credential. Account-wide management is an explicit admin-o
   pass the existing validation before consent/secret access and on the final Config.
   Platform retention of pasted widget inputs is outside this code's control;
   users must not share/export a notebook during sign-in.
+- Secret/profile authentication errors propagate so scheduled runs fail. Only
+  interactive waiting/retry paths exit cleanly; callback widget removal is
+  restricted to interactive mode. Deferred review follow-ups N1/N2/S1/S3 remain
+  outside this fix round.
 
 ### Budget API evidence
 
@@ -161,7 +184,9 @@ never committed or printed by the smoke.
 
 ## Gate state
 
-- Fake-client pytest suite: **122 collected cases, 122 passed**. Both source files
+- Pytest suite (fake API plus real OAuthClient/Config): **127 collected cases,
+  127 passed** on isolated **databricks-sdk 0.154.0** and local **0.114.0**.
+  The real OAuthClient URL test also passes against **0.67.0**. Both source files
   compile. Ruff checks pass (notebook-injected globals and path imports exempted);
   mypy checks pass (SDK imports skipped, notebook-injected globals exempted).
 - Read-only live gate: passed; 22 budgets, plan path and apply-false path executed,

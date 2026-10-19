@@ -1,4 +1,12 @@
 # Databricks notebook source
+# MAGIC %pip install --upgrade databricks-sdk
+
+# COMMAND ----------
+
+# MAGIC %restart_python
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Account budgets as code
 # MAGIC Edit declarations, then run all. `apply=false` is GET-only for budget calls.
@@ -112,10 +120,13 @@ try:
                              if AUTH_MODE == "interactive" else None),
     )
 except (ValueError, lib.BudgetError):
-    dbutils.notebook.exit("Account authentication failed (possibly stale/reused code or state mismatch). Re-run the sign-in cell and sign in again; secret/local mode users should verify their explicit credential configuration.")
+    if AUTH_MODE != "interactive":
+        raise
+    dbutils.notebook.exit("Account authentication failed (possibly stale/reused code or state mismatch). Re-run the sign-in cell and sign in again.")
 finally:
     account_consent = None
-    dbutils.widgets.remove("account_signin_redirect")
+    if AUTH_MODE == "interactive":
+        dbutils.widgets.remove("account_signin_redirect")
 if client is None:
     raise RuntimeError("Complete account authentication before continuing")
 print(f"Validated {len(declared)} budgets. Account credential configured; values suppressed.")

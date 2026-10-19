@@ -90,7 +90,12 @@ not deploy a workspace resource):
 databricks workspace import-dir bundles/budgets/src /Users/<you>/budgets --profile <workspace-profile>
 ```
 
-Edit the first declaration cell and run all. Validation collects every declaration
+Run the first `%pip install --upgrade databricks-sdk` cell, then the separate
+`%restart_python` cell before running any Python, widgets, or declarations. The
+runtime SDK confirmed on 2026-10-19 is **0.154.0**; the upgrade uses the latest
+available release. Restarting discards any pending sign-in and session credentials.
+Edit the declaration cell, then continue through the remaining cells (or run all
+from the beginning before starting sign-in). Validation collects every declaration
 and date-range error **before any budget API call**, after discovering the workspace.
 Never share private import-cell output
 or commit runtime IDs, emails, hosts, tokens, or exported live configuration.

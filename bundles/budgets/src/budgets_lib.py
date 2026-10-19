@@ -305,12 +305,15 @@ def account_auth_mode(in_runtime, account_auth=None):
 
 
 def initiate_account_signin(account_host, account_id):
-    from databricks.sdk.oauth import OAuthClient
+    from databricks.sdk.oauth import OAuthClient, OidcEndpoints
 
     validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
     try:
-        oauth = OAuthClient.from_host(account_host, client_id="databricks-cli",
-                                      redirect_url="http://localhost:8020", scopes=["all-apis", "offline_access"])
+        endpoint_prefix = f"{account_host.rstrip('/')}/oidc/accounts/{account_id}/v1"
+        endpoints = OidcEndpoints(authorization_endpoint=f"{endpoint_prefix}/authorize",
+                                 token_endpoint=f"{endpoint_prefix}/token")
+        oauth = OAuthClient(endpoints, client_id="databricks-cli",
+                            redirect_url="http://localhost:8020", scopes=["all-apis", "offline_access"])
         return oauth.initiate_consent()
     except Exception:
         raise BudgetError("Could not start account sign-in; re-run the sign-in cell (details suppressed)") from None
@@ -378,7 +381,7 @@ def account_client(*, in_runtime=False, account_id="", secret_scope="", secret_k
             return headers
 
         try:
-            config = Config(host=account_host, account_id=account_id, credentials_provider=session_provider, **options)
+            config = Config(host=account_host, account_id=account_id, credentials_strategy=session_provider, **options)
         except Exception:
             raise BudgetError("Could not configure the interactive account session") from None
     elif mode == "secret":

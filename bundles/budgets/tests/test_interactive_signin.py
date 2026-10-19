@@ -65,20 +65,49 @@ def test_stale_or_reused_code_is_sanitized():
     assert "private response" not in str(error.value)
 
 
-def test_consent_uses_sdk_public_client(monkeypatch):
-    from databricks.sdk.oauth import OAuthClient
+def test_consent_uses_real_sdk_account_public_client():
+    from urllib.parse import parse_qs, urlparse
 
-    factory = Mock(return_value=SimpleNamespace(initiate_consent=Mock(return_value=consent())))
-    monkeypatch.setattr(OAuthClient, "from_host", factory)
     result = lib.initiate_account_signin("https://accounts.cloud.databricks.com", "example-account")
-    assert result is factory.return_value.initiate_consent.return_value
-    assert factory.call_args.kwargs == {
-        "client_id": "databricks-cli", "redirect_url": "http://localhost:8020",
-        "scopes": ["all-apis", "offline_access"],
-    }
+    assert result.authorization_url.startswith(
+        "https://accounts.cloud.databricks.com/oidc/accounts/example-account/"
+    )
+    parameters = parse_qs(urlparse(result.authorization_url).query)
+    assert parameters["client_id"] == ["databricks-cli"]
+    assert parameters["redirect_uri"] == ["http://localhost:8020"]
+    assert parameters["scope"] == ["all-apis offline_access"]
+    assert parameters["code_challenge_method"] == ["S256"]
     with pytest.raises(ValueError):
         lib.initiate_account_signin("https://example.invalid", "example-account")
-    assert factory.call_count == 1
+
+
+def test_notebook_installs_sdk_and_restarts_before_python_cells():
+    source = (Path(__file__).parents[1] / "src" / "manage_budgets.py").read_text()
+    cells = source.split("# COMMAND ----------")
+    assert "# MAGIC %pip install --upgrade databricks-sdk" in cells[0]
+    assert "# MAGIC %restart_python" in cells[1]
+    assert source.index("%restart_python") < source.index("BUDGETS =")
+    assert source.index("%restart_python") < source.index("from databricks.sdk")
+
+
+@pytest.mark.parametrize("mode", ["secret", "profile"])
+@pytest.mark.parametrize("error_type", [ValueError, lib.BudgetError])
+def test_noninteractive_auth_failures_raise_without_notebook_exit(monkeypatch, mode, error_type):
+    failure = error_type("Explicit credentials failed")
+    monkeypatch.setattr(lib, "account_client", Mock(side_effect=failure))
+    source = (Path(__file__).parents[1] / "src" / "manage_budgets.py").read_text()
+    exchange_cell = next(cell for cell in source.split("# COMMAND ----------")
+                         if 'if AUTH_MODE == "interactive" and (' in cell)
+    notebook_exit = Mock(side_effect=RuntimeError("Unexpected successful notebook exit"))
+    widgets = SimpleNamespace(get=lambda name: "example", remove=Mock())
+    namespace = {"lib": lib, "AUTH_MODE": mode, "IN_RUNTIME": mode == "secret",
+                 "account_consent": None,
+                 "dbutils": SimpleNamespace(widgets=widgets, notebook=SimpleNamespace(exit=notebook_exit))}
+    with pytest.raises(error_type) as caught:
+        exec(compile(exchange_cell, "signin_cell", "exec"), namespace)
+    assert caught.value is failure
+    notebook_exit.assert_not_called()
+    widgets.remove.assert_not_called()
 
 
 def test_runtime_session_provider_is_refreshable_and_explicit(monkeypatch):
@@ -98,7 +127,7 @@ def test_runtime_session_provider_is_refreshable_and_explicit(monkeypatch):
     ]))
     lib.account_client(in_runtime=True, account_id="example-account", session_credentials=session)
     assert "token" not in captured and "profile" not in captured
-    headers = captured["credentials_provider"](SimpleNamespace(**captured))
+    headers = captured["credentials_strategy"](SimpleNamespace(group_id=None, **captured))
     assert headers()["Authorization"] == "Bearer example-first"
     assert headers()["Authorization"] == "Bearer example-next"
     assert session.token.call_count == 2
