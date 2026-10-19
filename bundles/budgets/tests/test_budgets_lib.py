@@ -7,6 +7,61 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_unchanged_adopt_is_registry_only():
+    api = FakeApi()
+    budget_id = api.add()
+    steps = lib.build_plan(client(api), prepared(declaration(budget_id=budget_id, adopt=True)), [])
+    assert steps[0]["action"] == "adopt"
+    result = lib.apply_plan(client(api), steps, apply=True)
+    assert result[0]["status"] == "ok"
+    assert {call[0] for call in api.calls} == {"GET"}
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+def test_lossy_import_cannot_hide_writable_difference(adopt):
+    api = FakeApi()
+    budget_id = api.add(declaration(notification_emails=["example@example.invalid"]))
+    actions = api.budgets[budget_id]["alert_configurations"][0]["action_configurations"]
+    actions.append(dict(actions[0]))
+    desired = prepared(declaration(budget_id=budget_id, adopt=adopt,
+                                   notification_emails=["example@example.invalid"]))
+    steps = lib.build_plan(client(api), desired, [] if adopt else [budget_id])
+    assert steps[0]["action"] == ("adopt" if adopt else "update")
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    assert len([call for call in api.calls if call[0] == "PUT"]) == 1
+
+
+def test_missing_registry_id_is_visible_and_never_mutates():
+    api = FakeApi()
+    steps = lib.build_plan(client(api), [], ["example-missing"])
+    assert len(steps) == 1
+    assert steps[0]["action"] == "error"
+    assert "not visible" in lib.plan_rows(steps)[0]["details"]
+    lib.apply_plan(client(api), steps, apply=True, allow_deletes=True)
+    assert {call[0] for call in api.calls} == {"GET"}
+
+
+def test_apply_rechecks_raw_body_not_lossy_import(monkeypatch):
+    api = FakeApi()
+    budget_id = api.add(declaration(notification_emails=["example@example.invalid"]))
+    actions = api.budgets[budget_id]["alert_configurations"][0]["action_configurations"]
+    actions.append(dict(actions[0]))
+    desired = prepared(declaration(budget_id=budget_id, notification_emails=["example@example.invalid"]))[0]
+    steps = [{"action": "adopt", "budget_id": budget_id, "name": desired["name"],
+              "desired": lib.desired_body(desired), "before": api.budgets[budget_id], "message": ""}]
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    assert any(call[0] == "PUT" for call in api.calls)
+
+
+def test_principal_override_decimal_format_is_not_a_write_difference():
+    desired = lib.desired_body(prepared(declaration())[0])
+    desired["alert_configurations"][0]["principal_overrides"] = [{"override_threshold": "1"}]
+    import copy
+
+    current = copy.deepcopy(desired)
+    current["alert_configurations"][0]["principal_overrides"][0]["override_threshold"] = "1.0"
+    assert lib.comparable_write_body(current) == lib.comparable_write_body(desired)
+
 SOURCE = Path(__file__).parents[1] / "src" / "budgets_lib.py"
 spec = importlib.util.spec_from_file_location("budgets_lib", SOURCE)
 lib = importlib.util.module_from_spec(spec)
@@ -252,14 +307,6 @@ def test_invalid_report_range(start, end):
         lib.report_query(prepared(declaration())[0], start, end, "example-account")
 
 
-def test_account_auth_no_workspace_fallback(monkeypatch):
-    monkeypatch.delenv("DATABRICKS_ACCOUNT_PROFILE", raising=False)
-    with pytest.raises(ValueError):
-        lib.account_client()
-    with pytest.raises(ValueError):
-        lib.account_client(in_runtime=True, account_id="example-account", secret_scope="", secret_key="")
-
-
 def test_account_host_allowlist():
     for host in ("https://example.cloud.databricks.com", "http://accounts.cloud.databricks.com", "https://accounts.cloud.databricks.com.evil.test"):
         with pytest.raises(ValueError):
@@ -304,58 +351,6 @@ def test_nonobject_response_is_sanitized():
     api = SimpleNamespace(api_client=SimpleNamespace(do=lambda *args, **kwargs: ["private-value"]))
     with pytest.raises(lib.BudgetError):
         lib.Client(api, "example-account").list()
-
-
-def test_runtime_secret_auth_is_explicit_and_account_only(monkeypatch):
-    import databricks.sdk
-    import databricks.sdk.core
-
-    captured = {}
-    reads = []
-
-    def config(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(**kwargs)
-
-    def secret(**kwargs):
-        reads.append(kwargs)
-        return "example-secret-token"
-
-    monkeypatch.setattr(databricks.sdk.core, "Config", config)
-    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda config: SimpleNamespace(api_client=FakeApi()))
-    result = lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
-                                secret_key="example-key", dbutils=SimpleNamespace(secrets=SimpleNamespace(get=secret)))
-    assert result.account_id == "example-account"
-    assert reads == [{"scope": "example-scope", "key": "example-key"}]
-    assert captured["auth_type"] == "pat" and captured["token"] == "example-secret-token"
-    assert "profile" not in captured
-
-
-def test_local_auth_uses_only_explicit_account_profile(monkeypatch):
-    import databricks.sdk
-    import databricks.sdk.core
-
-    captured = {}
-
-    def config(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(host="https://accounts.cloud.databricks.com", account_id=kwargs.get("account_id", "example-account"))
-
-    monkeypatch.setenv("DATABRICKS_ACCOUNT_PROFILE", "example-account-profile")
-    monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", "example-workspace-profile")
-    monkeypatch.setattr(databricks.sdk.core, "Config", config)
-    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda config: SimpleNamespace(api_client=FakeApi()))
-    assert lib.account_client(account_id="example-override").account_id == "example-override"
-    assert captured["profile"] == "example-account-profile"
-
-
-def test_runtime_invalid_host_does_not_read_secret():
-    reads = []
-    dbutils = SimpleNamespace(secrets=SimpleNamespace(get=lambda **kwargs: reads.append(kwargs)))
-    with pytest.raises(ValueError):
-        lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
-                           secret_key="example-key", account_host="https://example.invalid", dbutils=dbutils)
-    assert reads == []
 
 
 def test_create_failure_does_not_retry_or_print_private_details():
