@@ -28,11 +28,42 @@ The resolved host must be an allowlisted HTTPS Databricks accounts host. Environ
 overrides recognized by the SDK must also resolve to that account host. Do not mix
 workspace-token environment overrides with an account profile.
 
-**Databricks runtime:** supply the account ID and the scope/key of an existing secret
-containing an **account-host bearer token**. The caller needs permission to read that
-secret. The runtime constructs `Config(host=account_host, account_id=..., token=...,
-auth_type="pat")`; it never asks the notebook workspace for its token. Provision and
-rotate secrets through your normal secure process, never in notebook source/output.
+**Databricks runtime (default `account_auth=interactive`):** supply `account_id`
+and run the sign-in cell. It creates an SDK OAuth consent with authorization-code
++ PKCE S256, without a localhost listener or opening a browser on the server.
+Open the displayed link yourself. After signing in, the browser reaches an expected
+failed localhost page. Copy its **full address** into `account_signin_redirect`
+and run the **next cell**, then continue below it. Do not re-run the sign-in cell
+or Run all after pasting: that intentionally replaces the consent, invalidating
+the old callback. Run all with no pasted input exits cleanly after displaying the link.
+
+The full redirected URL verifies the returned state. A code-only paste is also
+supported, using the pending consent's state and PKCE verifier; it cannot independently
+verify the returned state, so prefer the full URL. The callback widget is cleared
+by removing the widget after every exchange attempt (the sign-in cell recreates it).
+Do not paste into source or print the callback;
+platform widget/history retention is outside the Python session's control. Never
+share/export a notebook while signing in. Consent, verifier, access token and refresh
+token stay in Python memory only; nothing is serialized by this project. Stale/reused
+codes or mismatched state require re-running the sign-in cell and signing in again.
+The account ID cannot be discovered without account credentials here: keep supplying
+the existing `account_id` widget. No workspace credential fallback is permitted.
+
+This uses the built-in **`databricks-cli` public OAuth client**, with scopes
+`all-apis` and `offline_access`, and redirect `http://localhost:8020`. The Databricks
+"Manually generate OAuth U2M access tokens" documentation supports this manual flow,
+but recommends registering a **custom OAuth application for non-built-in tools**;
+organization policy may therefore require a custom client before adopting this pattern.
+Access tokens last about **one hour**; SDK `SessionCredentials` refreshes them only
+for the live Python session. Restarting/detaching requires fresh interactive sign-in.
+
+**Scheduled/unattended runs (`account_auth=secret`):** supply the account ID and
+scope/key of an existing secret containing an **account-host bearer token**. The
+caller needs permission to read that secret. The runtime constructs
+`Config(host=account_host, account_id=..., token=..., auth_type="pat")`; it never
+asks the notebook workspace for its token. Provision and rotate secrets through
+your normal secure process, never in notebook source/output. Interactive mode does
+not read the secret widgets' values as credentials or access the secret store.
 
 The primary caller is a **workspace admin**, managing budgets scoped to their own
 workspace. Locally, `WorkspaceClient(profile="DEFAULT")` discovers that workspace;
@@ -70,8 +101,10 @@ or commit runtime IDs, emails, hosts, tokens, or exported live configuration.
 | `allow_deletes` | `false` | Deletion also requires this to be `true`. |
 | `account_id` | empty | Runtime requirement; optional local profile override. |
 | `account_host` | public AWS accounts host | Runtime accounts host; AWS, Azure, and GCP accounts hosts are allowlisted. Local host comes only from the selected profile. |
-| `account_token_secret_scope` | empty | Runtime account-token secret scope. |
-| `account_token_secret_key` | empty | Runtime account-token secret key. |
+| `account_auth` | `interactive` | Runtime `interactive` or `secret`; local runs always use the explicit account profile. |
+| `account_signin_redirect` | empty | Full redirected localhost URL (preferred) or code; consumed and cleared by the next cell. |
+| `account_token_secret_scope` | empty | Account-token secret scope, only for `secret` mode. |
+| `account_token_secret_key` | empty | Account-token secret key, only for `secret` mode. |
 | `report_start_date` | 30 days ago | Inclusive `YYYY-MM-DD` usage date. |
 | `report_end_date` | today | Exclusive `YYYY-MM-DD` usage date. |
 
@@ -168,6 +201,12 @@ of budget IDs in `MANAGED_BUDGET_IDS`, not automatically rediscovered state.
    or delete, and a fresh collision check before create. Updates PUT the **full**
    desired writable budget object, including the ID and account ID. Field-level diffs list
    changed field names without printing recipients or IDs.
+   A no-difference adoption is registry-only (GET verification, **no PUT**). Plan,
+   pre-mutation checks, and verification compare writable live fields directly to
+   desired writable fields, without a lossy declaration round-trip. Harmless server
+   metadata/defaults and decimal formatting are normalized, but duplicate actions
+   are retained for comparison. Registered IDs missing from the live list produce
+   visible error rows, not silent omissions or replacement creates.
 5. After a create/adopt, copy its ID from import into both its declaration and the
    ownership registry for subsequent runs. There is no hidden durable state.
 6. To delete, remove its declaration **but retain its ID in the registry**. The

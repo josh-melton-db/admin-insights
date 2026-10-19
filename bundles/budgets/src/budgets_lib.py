@@ -5,9 +5,10 @@ import datetime as dt
 import os
 import pprint
 import re
+import secrets
 import time
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 ACCOUNT_HOSTS = {
@@ -256,6 +257,34 @@ def write_body(body):
             if key in {"display_name", "filter", "alert_configurations", "resource_type"}}
 
 
+def comparable_write_body(body):
+    normalized = semantic_body(write_body(body))
+    normalized.setdefault("filter", {})
+    normalized.setdefault("resource_type", ALL_RESOURCES)
+    filters = normalized["filter"]
+    if filters.get("workspace_id"):
+        filters["workspace_id"]["values"] = sorted(filters["workspace_id"]["values"])
+    if filters.get("tags"):
+        for tag in filters["tags"]:
+            tag["value"]["values"] = sorted(tag["value"]["values"])
+        filters["tags"].sort(key=lambda tag: tag["key"])
+    for alert in normalized["alert_configurations"]:
+        for key in ("create_time", "update_time"):
+            alert.pop(key, None)
+        alert["quantity_threshold"] = _amount(alert["quantity_threshold"])
+        alert.setdefault("scope_type", SHARED)
+        alert.setdefault("principal_overrides", [])
+        for override in alert["principal_overrides"]:
+            override["override_threshold"] = _amount(override["override_threshold"])
+        alert.setdefault("action_configurations", [])
+        for action in alert["action_configurations"]:
+            for key in ("create_time", "update_time"):
+                action.pop(key, None)
+            action.setdefault("notify_affected_user", False)
+        alert["action_configurations"].sort(key=lambda action: repr(sorted(action.items())))
+    return normalized
+
+
 def validate_account_config(config):
     parsed = urlparse(config.host or "")
     if (parsed.scheme != "https" or parsed.hostname not in ACCOUNT_HOSTS or parsed.port not in (None, 443)
@@ -266,14 +295,93 @@ def validate_account_config(config):
     return config
 
 
+def account_auth_mode(in_runtime, account_auth=None):
+    if not in_runtime:
+        return "profile"
+    mode = "interactive" if account_auth is None else account_auth
+    if mode not in ("interactive", "secret"):
+        raise ValueError("account_auth must be interactive or secret")
+    return mode
+
+
+def initiate_account_signin(account_host, account_id):
+    from databricks.sdk.oauth import OAuthClient
+
+    validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
+    try:
+        oauth = OAuthClient.from_host(account_host, client_id="databricks-cli",
+                                      redirect_url="http://localhost:8020", scopes=["all-apis", "offline_access"])
+        return oauth.initiate_consent()
+    except Exception:
+        raise BudgetError("Could not start account sign-in; re-run the sign-in cell (details suppressed)") from None
+
+
+def exchange_account_signin(consent, pasted):
+    instruction = "Re-run the sign-in cell, sign in, then paste the redirected URL or code into the widget."
+    if consent is None or not isinstance(pasted, str) or not pasted.strip():
+        raise ValueError("No pending consent or missing code. " + instruction)
+    expected = parse_qs(urlparse(consent.authorization_url).query).get("state", [])
+    if len(expected) != 1 or not expected[0]:
+        raise ValueError("Invalid pending consent. " + instruction)
+    value = pasted.strip()
+    if "://" in value:
+        try:
+            redirect = urlparse(value)
+            query = parse_qs(redirect.query, keep_blank_values=True)
+            valid_redirect = (redirect.scheme == "http" and redirect.hostname == "localhost" and
+                              redirect.port == 8020 and not redirect.username and not redirect.password and
+                              redirect.path in ("", "/") and not redirect.fragment)
+        except ValueError:
+            raise ValueError("Invalid redirected URL. " + instruction) from None
+        if (not valid_redirect or "error" in query or len(query.get("code", [])) != 1 or
+                not query["code"][0] or len(query.get("state", [])) != 1):
+            raise ValueError("Missing code/state or invalid redirected URL. " + instruction)
+        code, state = query["code"][0], query["state"][0]
+        if not secrets.compare_digest(state.encode(), expected[0].encode()):
+            raise ValueError("Sign-in state mismatch. " + instruction)
+    else:
+        if any(character.isspace() for character in value) or any(character in value for character in "?&#"):
+            raise ValueError("Invalid authorization code. " + instruction)
+        code, state = value, expected[0]
+    try:
+        return consent.exchange(code, state)
+    except Exception:
+        raise BudgetError("Account sign-in failed; the code may be stale or reused. " + instruction) from None
+
+
 def account_client(*, in_runtime=False, account_id="", secret_scope="", secret_key="",
-                   account_host="https://accounts.cloud.databricks.com", dbutils=None):
-    """Same account Config/secret path as budget_api_auth; never use WorkspaceClient auth."""
+                   account_host="https://accounts.cloud.databricks.com", dbutils=None,
+                   account_auth=None, session_credentials=None):
+    """Explicit account credentials only; never use WorkspaceClient auth."""
     from databricks.sdk import AccountClient
     from databricks.sdk.core import Config
 
     options = {"http_timeout_seconds": 30, "retry_timeout_seconds": 60}
-    if in_runtime:
+    mode = account_auth_mode(in_runtime, account_auth)
+    if mode == "interactive":
+        from databricks.sdk.credentials_provider import credentials_strategy
+
+        validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
+        if session_credentials is None:
+            raise ValueError("Complete the sign-in cell before configuring the account client")
+
+        @credentials_strategy("budget-interactive", [])
+        def session_provider(config):
+            validate_account_config(config)
+
+            def headers():
+                try:
+                    return {"Authorization": "Bearer " + session_credentials.token().access_token}
+                except Exception:
+                    raise BudgetError("Account session expired; re-run the sign-in cell") from None
+
+            return headers
+
+        try:
+            config = Config(host=account_host, account_id=account_id, credentials_provider=session_provider, **options)
+        except Exception:
+            raise BudgetError("Could not configure the interactive account session") from None
+    elif mode == "secret":
         if not all((account_id, secret_scope, secret_key, dbutils)):
             raise ValueError("Runtime requires account_id and account-token secret scope/key")
         validate_account_config(type("AccountConfig", (), {"host": account_host, "account_id": account_id})())
@@ -443,8 +551,9 @@ def build_plan(client, declared, managed_budget_ids):
             else:
                 try:
                     current = client.get(budget_id)
-                    normalized = semantic_body(desired_body(declaration_from_live(current)))
-                    desired = semantic_body(step["desired"])
+                    declaration_from_live(current)
+                    normalized = comparable_write_body(current)
+                    desired = comparable_write_body(step["desired"])
                     step["before"] = current
                     step["action"] = ("adopt" if budget_id not in managed_budget_ids else
                                       "no-op" if normalized == desired else "update")
@@ -463,6 +572,9 @@ def build_plan(client, declared, managed_budget_ids):
             current = client.get(budget_id)
             steps.append({"name": current.get("display_name", ""), "budget_id": budget_id, "action": "delete",
                           "before": current, "message": "Explicitly owned ID removed from BUDGETS; requires both gates"})
+        else:
+            steps.append({"name": "", "budget_id": budget_id, "action": "error", "before": None,
+                          "message": "Registered managed ID is not visible; verify access/deletion and remove its registry entry"})
     return steps
 
 
@@ -478,7 +590,9 @@ def _verify(client, budget_id, desired=None, deleted=False, sleep=time.sleep):
                 return True
         else:
             try:
-                if semantic_body(desired_body(declaration_from_live(client.get(budget_id)))) == semantic_body(desired):
+                current = client.get(budget_id)
+                declaration_from_live(current)
+                if comparable_write_body(current) == comparable_write_body(desired):
                     return True
             except (BudgetError, TypeError, KeyError, ValueError):
                 pass
@@ -512,12 +626,15 @@ def apply_plan(client, steps, *, apply=False, allow_deletes=False, sleep=time.sl
                 if not budget_id:
                     raise BudgetError("Create outcome unknown; import before retrying")
             elif action in ("update", "adopt", "delete"):
-                if client.get(budget_id) != step["before"]:
+                current = client.get(budget_id)
+                if current != step["before"]:
                     raise BudgetError("Target changed since plan; re-plan")
                 if action == "delete":
                     client.delete(budget_id)
                 else:
-                    client.update(budget_id, step["desired"])
+                    declaration_from_live(current)
+                    if comparable_write_body(current) != comparable_write_body(step["desired"]):
+                        client.update(budget_id, step["desired"])
             else:
                 raise BudgetError("Unknown plan action")
             confirmed = _verify(client, budget_id, step.get("desired"), deleted=action == "delete", sleep=sleep)

@@ -8,6 +8,46 @@ using an account-host credential. Account-wide management is an explicit admin-o
 
 ## API evidence (2026-10-19)
 
+### Interactive authentication evidence (2026-10-19)
+
+- Step 0 passed on the explicitly authorized CLI profile `DEFAULT`: a one-off
+  serverless environment **5** notebook GET of the account OIDC discovery endpoint
+  returned **HTTP 200**. Run `336135853517125` terminated `SUCCESS`; the temporary
+  workspace notebook was deleted. No login, token exchange, or budget mutation
+  was performed. No dependencies were installed on serverless.
+- Discovery advertises `authorization_code`, `refresh_token`, `client_credentials`,
+  PKCE `S256`, and token authentication method `none`. Device flow is not supported.
+  The manual flow uses public client `databricks-cli`, redirect
+  `http://localhost:8020`, and scopes `all-apis`, `offline_access`. A custom OAuth
+  application is recommended by Databricks for non-built-in tools. Background
+  exploration verified authorize accepts the redirect without completing login;
+  this change does not claim a completed human sign-in.
+- `inspect.signature` verified the following **identical** signatures locally
+  (`databricks-sdk==0.114.0`) and inside the Step 0 serverless run
+  (preinstalled `databricks-sdk==0.67.0`):
+
+  ```python
+  OAuthClient.from_host(host: str, client_id: str, redirect_url: str, *, scopes: List[str] = None, client_secret: str = None) -> 'OAuthClient'
+  OAuthClient.initiate_consent(self) -> databricks.sdk.oauth.Consent
+  Consent.exchange(self, code: str, state: str) -> databricks.sdk.oauth.SessionCredentials
+  ```
+
+- `Consent.authorization_url` carries the state; `Consent.exchange` checks state
+  and exchanges using its in-memory PKCE verifier. The notebook also checks URL
+  state before exchange, rejects ambiguous/missing callback parameters, and clears
+  the input widget on consumption. Code-only pastes use pending state, so cannot
+  independently verify returned state. No `external-browser` auth, listener,
+  consent serialization, or token persistence is used. The `Config` credential
+  provider calls `SessionCredentials.token()` for each authorization header,
+  retaining SDK refresh for the session rather than freezing an access token.
+- Runtime mode defaults to `interactive`; scheduled/unattended runs explicitly
+  use `secret`. Local runs keep `DATABRICKS_ACCOUNT_PROFILE`. Hosts and account IDs
+  pass the existing validation before consent/secret access and on the final Config.
+  Platform retention of pasted widget inputs is outside this code's control;
+  users must not share/export a notebook during sign-in.
+
+### Budget API evidence
+
 Official API pages were fetched and their rendered schema inspected. The old
 `/api/account/budgets/{create,get,list,update,delete}` URLs redirect to the links
 below. The official Python SDK's `billing.BudgetsAPI` independently confirms REST
@@ -92,12 +132,17 @@ never committed or printed by the smoke.
 - Deletions use registry IDs absent from desired declarations, not names/prefixes
   or a broad live scan. They require `apply is True` and `allow_deletes is True`.
 - Local auth requires `DATABRICKS_ACCOUNT_PROFILE`; runtime requires account ID and
-  a readable account-token secret. Runtime account host is allowlisted. The library
+  interactive consent by default, or an explicitly selected readable account-token
+  secret. Runtime account host is allowlisted. The library
   never constructs a workspace client or obtains a workspace token.
 - Plan and export make GET requests only. Spark reporting is separate; local smoke
   only inspects metadata with the explicitly selected workspace profile `DEFAULT`.
 - Full replacement is intentional. Unsupported shapes fail closed. Snapshot checks
   compare a fresh GET with the planned object before each existing-target mutation.
+  Writable live fields are compared directly with desired writable fields before
+  update/adopt, and during plan/verification; declaration conversion cannot hide
+  duplicate actions. Unchanged adoption is registry-only, with no PUT. Missing
+  registered IDs produce visible error rows and never replacement creates.
   Create checks for a new name collision immediately before POST.
 - There is no transactional concurrency control or documented idempotency key.
   No library create retries; unknown outcomes require manual inspection/import.
@@ -116,17 +161,19 @@ never committed or printed by the smoke.
 
 ## Gate state
 
-- Fake-client pytest suite: **91 collected cases, 91 passed**. Both source files
+- Fake-client pytest suite: **122 collected cases, 122 passed**. Both source files
   compile. Ruff checks pass (notebook-injected globals and path imports exempted);
   mypy checks pass (SDK imports skipped, notebook-injected globals exempted).
 - Read-only live gate: passed; 22 budgets, plan path and apply-false path executed,
   import emitted a valid Python literal for all 22 and a no-op plan for every entry, both table metadata
   calls HTTP 200. No SQL submission, deployment, or pre-existing-budget mutation.
-- Authorized workspace-scoped throwaway gate: **passed**, using only account profile
+- Historical baseline (PR #12) authorized workspace-scoped throwaway gate: **passed**, using only account profile
   `budget-account-test` and DEFAULT workspace discovery. Exactly one budget created:
   POST 200; verification GET 200; one PUT 200 and GET-confirmed new amount; DELETE 200
   through `apply_plan(apply=True, allow_deletes=True)` in `finally`; absence-list GET
   200 and direct GET 404. Zero left behind, zero pre-existing budgets mutated.
+  This interactive-sign-in change did **not** run that mutating gate; its live
+  checks were GET-only. Human OAuth login and report SQL remain untested.
 - Earlier rejected attempts created nothing: account-wide POST 403; top-level
   workspace metadata POST 400. The 400 message established the correct filter-only
   write shape; there was no credential/profile change. Mutations are not retried

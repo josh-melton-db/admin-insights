@@ -323,7 +323,7 @@ def test_runtime_secret_auth_is_explicit_and_account_only(monkeypatch):
 
     monkeypatch.setattr(databricks.sdk.core, "Config", config)
     monkeypatch.setattr(databricks.sdk, "AccountClient", lambda config: SimpleNamespace(api_client=FakeApi()))
-    result = lib.account_client(in_runtime=True, account_id="example-account", secret_scope="example-scope",
+    result = lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
                                 secret_key="example-key", dbutils=SimpleNamespace(secrets=SimpleNamespace(get=secret)))
     assert result.account_id == "example-account"
     assert reads == [{"scope": "example-scope", "key": "example-key"}]
@@ -353,7 +353,7 @@ def test_runtime_invalid_host_does_not_read_secret():
     reads = []
     dbutils = SimpleNamespace(secrets=SimpleNamespace(get=lambda **kwargs: reads.append(kwargs)))
     with pytest.raises(ValueError):
-        lib.account_client(in_runtime=True, account_id="example-account", secret_scope="example-scope",
+        lib.account_client(in_runtime=True, account_auth="secret", account_id="example-account", secret_scope="example-scope",
                            secret_key="example-key", account_host="https://example.invalid", dbutils=dbutils)
     assert reads == []
 
