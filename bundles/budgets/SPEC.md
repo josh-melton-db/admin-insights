@@ -44,7 +44,7 @@ and report failures return nonzero. Argparse usage errors return 2.
 
 `budgets_lib.report_query` supplies parameterized SQL to the workspace Statement
 Execution API. Named parameters are sent as SDK statement parameters. Pending
-statements are polled with a five-minute deadline; all inline chunks are printed
+statements are polled with a five-minute deadline and cancelled on timeout; all inline chunks are printed
 as a plain table. Failed, timed-out, missing, or truncated results fail nonzero.
 Dates default to [today minus 30 days, today). SQL execution is opt-in and may
 start warehouse compute; it is separate from budget mutations.

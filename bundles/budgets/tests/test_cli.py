@@ -110,11 +110,59 @@ def test_validation_error_before_account_auth(setup_cli, monkeypatch):
     setup_cli[2].assert_not_called()
 
 
-def test_plan_auth_failure_has_login_command(setup_cli, capsys):
-    setup_cli[0].do = Mock(side_effect=RuntimeError("private-token"))
+@pytest.mark.parametrize("error_type", ["Unauthenticated", "PermissionDenied"])
+def test_plan_auth_failure_has_login_command(setup_cli, capsys, error_type):
+    from databricks.sdk import errors
+
+    setup_cli[0].do = Mock(side_effect=getattr(errors, error_type)("private-token"))
     assert run() != 0
     output = capsys.readouterr().err
     assert "databricks auth login" in output and "private-token" not in output
+
+
+def test_plan_budget_error_does_not_suggest_login(setup_cli, monkeypatch, capsys):
+    monkeypatch.setattr(cli.lib, "build_plan", Mock(side_effect=cli.lib.BudgetError("Ambiguous live budget IDs")))
+    assert run() != 0
+    output = capsys.readouterr().err
+    assert "Ambiguous live budget IDs" in output
+    assert "databricks auth login" not in output
+
+
+def test_plan_target_auth_failure_has_login_command(setup_cli, monkeypatch, capsys):
+    from databricks.sdk.errors import Unauthenticated
+
+    api = setup_cli[0]
+    budget_id = api.add(declaration(name="team"))
+    monkeypatch.setattr(cli, "BUDGETS", [declaration(name="team", budget_id=budget_id)])
+    monkeypatch.setattr(cli, "MANAGED_BUDGET_IDS", [budget_id])
+    original = api.do
+
+    def read(method, path, **kwargs):
+        if not path.endswith("/budgets"):
+            raise Unauthenticated("private-token")
+        return original(method, path, **kwargs)
+
+    api.do = read
+    assert run() != 0
+    output = capsys.readouterr().err
+    assert "databricks auth login" in output and "private-token" not in output
+
+
+def test_plan_server_error_does_not_suggest_login(setup_cli, capsys):
+    from databricks.sdk.errors import InternalError
+
+    setup_cli[0].do = Mock(side_effect=InternalError("private-response"))
+    assert run() != 0
+    output = capsys.readouterr().err
+    assert "Budgets API GET failed" in output
+    assert "databricks auth login" not in output and "private-response" not in output
+
+
+def test_missing_workspace_scope_validated_before_account_auth(setup_cli, capsys):
+    assert cli.main(["--account-profile", "chosen"]) != 0
+    output = capsys.readouterr().err
+    assert "--workspace-profile or --workspace-id" in output
+    setup_cli[2].assert_not_called()
 
 
 def test_import_is_opt_in(setup_cli, monkeypatch):
@@ -180,6 +228,10 @@ def test_report_failures_are_nonzero(setup_cli, monkeypatch, capsys, failure):
         monkeypatch.setattr(cli.time, "monotonic", Mock(side_effect=[0, 301]))
     assert run("--report", "--warehouse-id", "warehouse") != 0
     assert "private-token" not in capsys.readouterr().err
+    if failure == "timeout":
+        execution.cancel_execution.assert_called_once_with("statement")
+    else:
+        execution.cancel_execution.assert_not_called()
 
 
 def test_report_requires_workspace_profile(setup_cli):

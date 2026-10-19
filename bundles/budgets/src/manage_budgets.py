@@ -70,6 +70,7 @@ def report(workspace, warehouse_id, declared, start_date, end_date, account_id):
             deadline = time.monotonic() + 300
             while response.status and response.status.state in (StatementState.PENDING, StatementState.RUNNING):
                 if time.monotonic() >= deadline:
+                    execution.cancel_execution(response.statement_id)
                     raise lib.BudgetError("Report timed out; inspect the warehouse query history")
                 time.sleep(1)
                 response = execution.get_statement(response.statement_id)
@@ -120,11 +121,11 @@ def main(argv=None):
         try:
             account = AccountClient(profile=args.account_profile)
             lib.validate_account_config(account.config)
-            client = lib.Client(account, account.config.account_id)
-            steps = lib.build_plan(client, declared, MANAGED_BUDGET_IDS)
         except Exception:
             print(login_message(args.account_profile), file=sys.stderr)
             return 1
+        client = lib.Client(account, account.config.account_id)
+        steps = lib.build_plan(client, declared, MANAGED_BUDGET_IDS)
         print(f"Validated {len(declared)} budgets.")
         for row in lib.plan_rows(steps):
             print(row)
@@ -145,6 +146,9 @@ def main(argv=None):
         if args.report:
             report(workspace, args.warehouse_id, declared, args.start_date, args.end_date, client.account_id)
         return 0
+    except lib.BudgetAuthError:
+        print(login_message(args.account_profile), file=sys.stderr)
+        return 1
     except lib.BudgetError as error:
         print(str(error), file=sys.stderr)
         return 1

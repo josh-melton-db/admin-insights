@@ -6,6 +6,62 @@ from types import SimpleNamespace
 
 import pytest
 
+
+def test_unchanged_adopt_is_registry_only():
+    api = FakeApi()
+    budget_id = api.add()
+    steps = lib.build_plan(client(api), prepared(declaration(budget_id=budget_id, adopt=True)), [])
+    assert steps[0]["action"] == "adopt"
+    result = lib.apply_plan(client(api), steps, apply=True)
+    assert result[0]["status"] == "ok"
+    assert {call[0] for call in api.calls} == {"GET"}
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+def test_lossy_import_cannot_hide_writable_difference(adopt):
+    api = FakeApi()
+    budget_id = api.add(declaration(notification_emails=["example@example.invalid"]))
+    actions = api.budgets[budget_id]["alert_configurations"][0]["action_configurations"]
+    actions.append(dict(actions[0]))
+    desired = prepared(declaration(budget_id=budget_id, adopt=adopt,
+                                   notification_emails=["example@example.invalid"]))
+    steps = lib.build_plan(client(api), desired, [] if adopt else [budget_id])
+    assert steps[0]["action"] == ("adopt" if adopt else "update")
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    assert len([call for call in api.calls if call[0] == "PUT"]) == 1
+
+
+def test_missing_registry_id_is_visible_and_never_mutates():
+    api = FakeApi()
+    steps = lib.build_plan(client(api), [], ["example-missing"])
+    assert len(steps) == 1
+    assert steps[0]["action"] == "error"
+    assert "not visible" in lib.plan_rows(steps)[0]["details"]
+    lib.apply_plan(client(api), steps, apply=True, allow_deletes=True)
+    assert {call[0] for call in api.calls} == {"GET"}
+
+
+def test_apply_rechecks_raw_body_not_lossy_import(monkeypatch):
+    api = FakeApi()
+    budget_id = api.add(declaration(notification_emails=["example@example.invalid"]))
+    actions = api.budgets[budget_id]["alert_configurations"][0]["action_configurations"]
+    actions.append(dict(actions[0]))
+    desired = prepared(declaration(budget_id=budget_id, notification_emails=["example@example.invalid"]))[0]
+    steps = [{"action": "adopt", "budget_id": budget_id, "name": desired["name"],
+              "desired": lib.desired_body(desired), "before": api.budgets[budget_id], "message": ""}]
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    assert any(call[0] == "PUT" for call in api.calls)
+
+
+def test_principal_override_decimal_format_is_not_a_write_difference():
+    desired = lib.desired_body(prepared(declaration())[0])
+    desired["alert_configurations"][0]["principal_overrides"] = [{"override_threshold": "1"}]
+    import copy
+
+    current = copy.deepcopy(desired)
+    current["alert_configurations"][0]["principal_overrides"][0]["override_threshold"] = "1.0"
+    assert lib.comparable_write_body(current) == lib.comparable_write_body(desired)
+
 SOURCE = Path(__file__).parents[1] / "src" / "budgets_lib.py"
 spec = importlib.util.spec_from_file_location("budgets_lib", SOURCE)
 lib = importlib.util.module_from_spec(spec)

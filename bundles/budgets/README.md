@@ -74,6 +74,7 @@ Reporting uses the workspace SQL Statement Execution API and requires warehouse
 access and SELECT on `system.billing.usage` and `system.billing.list_prices`.
 Dates default to the last 30 days, inclusive start and exclusive end. Results
 print as plain tables; asynchronous execution is polled for up to five minutes,
+then a timed-out statement is cancelled before returning an error;
 all result chunks are read, and failed/truncated results exit nonzero. Reporting
 is opt-in and can start warehouse compute; it never writes budgets without
 `--apply`.

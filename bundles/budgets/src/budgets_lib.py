@@ -8,6 +8,8 @@ import time
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
+from databricks.sdk.errors import PermissionDenied, Unauthenticated
+
 ACCOUNT_HOSTS = {
     "accounts.cloud.databricks.com",
     "accounts.azuredatabricks.net",
@@ -32,6 +34,10 @@ PER_USER = "ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER"
 
 class BudgetError(RuntimeError):
     """Sanitized API or unsupported-schema failure."""
+
+
+class BudgetAuthError(BudgetError):
+    """Sanitized account authentication or authorization failure."""
 
 
 def _amount(value):
@@ -135,7 +141,7 @@ def prepare(entries, workspace_id=None):
         if scope not in ("workspace", "account"):
             errors.append(f"{label}: scope must be workspace or account")
         if scope == "workspace" and (type(scoped_workspace) is not int or not 0 < scoped_workspace < 2**63):
-            errors.append(f"{label}: workspace scope requires a positive runtime workspace_id")
+            errors.append(f"{label}: workspace scope requires a positive workspace ID; pass --workspace-profile or --workspace-id")
         if scope == "account" and scoped_workspace is not None:
             errors.append(f"{label}: account scope cannot specify workspace_id")
         resource_type = entry.get("resource_type", ALL_RESOURCES)
@@ -303,6 +309,8 @@ class Client:
     def _do(self, method, suffix="", **kwargs):
         try:
             response = self.api.do(method, self.base + suffix, **kwargs)
+        except (Unauthenticated, PermissionDenied):
+            raise BudgetAuthError("Account authentication or authorization failed; details suppressed") from None
         except Exception:
             raise BudgetError(f"Budgets API {method} failed; response details suppressed") from None
         if response is None:
@@ -446,6 +454,8 @@ def build_plan(client, declared, managed_budget_ids):
                                       "no-op" if normalized == desired else "update")
                     changed = [key for key in normalized.keys() | desired.keys() if normalized.get(key) != desired.get(key)]
                     step["message"] = "Changed fields: " + ", ".join(changed) if changed else "Desired fields match"
+                except BudgetAuthError:
+                    raise
                 except (BudgetError, TypeError, KeyError, ValueError):
                     step["message"] = "Could not safely read or represent target; no mutation allowed"
         elif any(existing.get("display_name") == budget["name"] for existing in live):
