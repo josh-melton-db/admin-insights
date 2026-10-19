@@ -38,11 +38,18 @@ ALLOW_DELETES = dbutils.widgets.get("allow_deletes") == "true"
 
 import os
 import sys
+from databricks.sdk import WorkspaceClient
 
 sys.path.insert(0, os.getcwd())
 import budgets_lib as lib
 
-declared, errors = lib.prepare(BUDGETS)
+IN_RUNTIME = bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
+workspace = WorkspaceClient() if IN_RUNTIME else WorkspaceClient(profile="DEFAULT")
+try:
+    WORKSPACE_ID = int(workspace.get_workspace_id())
+except Exception:
+    raise RuntimeError("Could not discover current workspace ID; verify the workspace credential/context") from None
+declared, errors = lib.prepare(BUDGETS, workspace_id=WORKSPACE_ID)
 if not isinstance(MANAGED_BUDGET_IDS, list) or any(
     not isinstance(budget_id, str) or not lib.ID_RE.fullmatch(budget_id)
     for budget_id in MANAGED_BUDGET_IDS
@@ -58,7 +65,7 @@ except ValueError:
 if errors:
     raise ValueError("Invalid declarations:\n" + "\n".join(f"  - {error}" for error in errors))
 client = lib.account_client(
-    in_runtime=bool(os.environ.get("DATABRICKS_RUNTIME_VERSION")),
+    in_runtime=IN_RUNTIME,
     account_id=dbutils.widgets.get("account_id").strip(),
     account_host=dbutils.widgets.get("account_host").strip(),
     secret_scope=dbutils.widgets.get("account_token_secret_scope").strip(),
@@ -100,11 +107,17 @@ print(lib.export_budgets(client))
 
 print("USD estimated list cost; monthly thresholds are not prorated. Partial months and missing prices are flagged.")
 for index, budget in enumerate(declared, 1):
-    query, parameters = lib.report_query(
-        budget, dbutils.widgets.get("report_start_date"), dbutils.widgets.get("report_end_date"), client.account_id
-    )
-    print(f"Budget #{index}")
-    try:
-        display(spark.sql(query, args=parameters))
-    except Exception:
-        raise RuntimeError("Report failed: verify billing-table SELECT privileges and compatible Spark runtime; details suppressed") from None
+    for alert_index in range(len(budget.get("alerts", [None]))):
+        print(f"Budget #{index}, alert #{alert_index + 1}")
+        try:
+            query, parameters = lib.report_query(
+                budget, dbutils.widgets.get("report_start_date"), dbutils.widgets.get("report_end_date"),
+                client.account_id, alert_index=alert_index
+            )
+        except ValueError as error:
+            print(f"Report limitation: {error}")
+            continue
+        try:
+            display(spark.sql(query, args=parameters))
+        except Exception:
+            raise RuntimeError("Report failed: verify billing-table SELECT privileges and compatible Spark runtime; details suppressed") from None

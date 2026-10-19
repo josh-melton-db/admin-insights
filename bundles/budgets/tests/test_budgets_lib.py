@@ -18,7 +18,7 @@ def declaration(**changes):
 
 
 def prepared(*entries):
-    budgets, errors = lib.prepare(list(entries))
+    budgets, errors = lib.prepare(list(entries), workspace_id=101)
     assert not errors, errors
     return budgets
 
@@ -93,7 +93,7 @@ def test_duplicate_names_and_ids():
 
 
 def test_real_wire_schema_and_canonicalization():
-    budget = prepared(declaration(workspace_ids=[2, 1, 2], tags={"Team": ["b", "a"]}))[0]
+    budget = prepared(declaration(scope="account", workspace_ids=[2, 1, 2], tags={"Team": ["b", "a"]}))[0]
     body = lib.desired_body(budget)
     assert body["display_name"] == "example-team"
     assert body["filter"] == {
@@ -215,7 +215,7 @@ def test_pagination_and_repeated_token_fail_closed():
 def test_read_failure_and_unsupported_budget_fail_closed():
     api = FakeApi()
     budget_id = api.add()
-    api.budgets[budget_id]["alert_configurations"][0]["action_configurations"] = [{"action_type": "BLOCK_USAGE"}]
+    api.budgets[budget_id]["alert_configurations"][0]["action_configurations"] = [{"action_type": "UNKNOWN_ACTION"}]
     steps = lib.build_plan(client(api), prepared(declaration(budget_id=budget_id, adopt=True)), [])
     assert steps[0]["action"] == "error"
     exported = lib.export_budgets(client(api))
@@ -233,7 +233,7 @@ def test_error_messages_never_echo_remote_response():
 
 
 def test_report_query_parameters_and_missing_prices():
-    desired = prepared(declaration(workspace_ids=[1], tags={"a' OR true": ["x' OR true"]}))[0]
+    desired = prepared(declaration(workspace_id=1, workspace_ids=[1], tags={"a' OR true": ["x' OR true"]}))[0]
     sql, parameters = lib.report_query(desired, "2026-01-01", "2026-03-01", "example-account")
     assert "system.billing.usage" in sql and "system.billing.list_prices" in sql
     assert "LEFT JOIN" in sql and "unpriced_rows" in sql
@@ -268,17 +268,17 @@ def test_account_host_allowlist():
 
 def test_import_roundtrip_preserves_supported_filters():
     api = FakeApi()
-    api.add(declaration(workspace_ids=[1, 2], tags={"Team": ["a", "b"]}))
+    api.add(declaration(scope="account", workspace_ids=[1, 2], tags={"Team": ["a", "b"]}))
     exported = ast.literal_eval(lib.export_budgets(client(api)).split("=", 1)[1])
     assert not lib.prepare(exported)[1]
-    assert lib.desired_body(prepared(*exported)[0]) == lib.desired_body(prepared(declaration(workspace_ids=[1, 2], tags={"Team": ["a", "b"]}))[0])
+    assert lib.desired_body(prepared(*exported)[0]) == lib.desired_body(prepared(declaration(scope="account", workspace_ids=[1, 2], tags={"Team": ["a", "b"]}))[0])
 
 
 def test_live_default_metadata_is_not_an_ownership_marker():
     api = FakeApi()
     budget_id = api.add()
     live = api.budgets[budget_id]
-    live.update(name="resource-name", workspace_id=0, backfilled_usage_start_time=0,
+    live.update(name="resource-name", workspace_id=101, backfilled_usage_start_time=0,
                 streaming_ingestion_start_time=0, include_external_spend=False,
                 pricing_basis="BUDGET_PRICING_BASIS_LIST_PRICE",
                 product_type="BUDGET_PRODUCT_TYPE_ALL_PRODUCTS",
@@ -289,9 +289,8 @@ def test_live_default_metadata_is_not_an_ownership_marker():
 
 
 @pytest.mark.parametrize("change", [
-    {"include_external_spend": True}, {"pricing_basis": "OTHER"},
-    {"product_type": "BUDGET_PRODUCT_TYPE_UNITY_AI_GATEWAY"},
-    {"resource_type": "BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY"}, {"new_mutable_field": True},
+    {"pricing_basis": "OTHER"}, {"product_type": "OTHER"},
+    {"resource_type": "OTHER"}, {"new_mutable_field": True},
 ])
 def test_new_or_scoped_features_cannot_be_silently_erased(change):
     api = FakeApi()
@@ -393,3 +392,125 @@ def test_unconfirmed_create_keeps_returned_id_for_recovery():
     steps = lib.build_plan(target, prepared(declaration()), [])
     result = lib.apply_plan(target, steps, apply=True, sleep=lambda duration: None)[0]
     assert result["status"] == "unconfirmed" and result["budget_id"] == "1"
+
+
+def test_workspace_scope_defaults_to_runtime_workspace():
+    budget = prepared(declaration())[0]
+    body = lib.desired_body(budget)
+    assert budget["scope"] == "workspace"
+    assert body["workspace_id"] == 101
+    assert body["filter"]["workspace_id"] == {"operator": "IN", "values": [101]}
+    assert body["resource_type"] == "BUDGET_RESOURCE_TYPE_ALL_RESOURCES"
+    assert lib.prepare([declaration()])[1]
+
+
+def test_account_scope_is_explicit_opt_in():
+    budgets, errors = lib.prepare([declaration(scope="account")])
+    assert not errors
+    body = lib.desired_body(budgets[0])
+    assert "workspace_id" not in body and "workspace_id" not in body["filter"]
+
+
+@pytest.mark.parametrize("change", [
+    {"scope": "other"}, {"workspace_id": True}, {"workspace_id": -1},
+    {"scope": "account", "workspace_id": 101}, {"workspace_ids": [102]},
+    {"resource_type": "unknown"}, {"product_type": "unknown"}, {"include_external_spend": "false"},
+])
+def test_scope_validation(change):
+    assert lib.prepare([declaration(**change)], workspace_id=101)[1]
+
+
+def test_scoped_budget_import_plan_apply_roundtrip():
+    api = FakeApi()
+    budget_id = api.add(declaration(workspace_id=202, resource_type="BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY"))
+    exported = ast.literal_eval(lib.export_budgets(client(api)).split("BUDGETS = ", 1)[1])
+    assert exported[0]["workspace_id"] == 202
+    assert exported[0]["scope"] == "workspace"
+    desired = prepared(*exported)
+    assert lib.build_plan(client(api), desired, [budget_id])[0]["action"] == "no-op"
+    desired[0]["amount"] = "200"
+    steps = lib.build_plan(client(api), desired, [budget_id])
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    wire = next(call[2]["budget"] for call in api.calls if call[0] == "PUT")
+    assert "workspace_id" not in wire
+    assert wire["filter"]["workspace_id"]["values"] == [202]
+    assert wire["resource_type"] == "BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY"
+
+
+def test_multi_alert_per_user_import_preserves_semantics():
+    api = FakeApi()
+    budget_id = api.add()
+    live = api.budgets[budget_id]
+    shared = live["alert_configurations"][0]
+    shared.update(scope_type="ALERT_CONFIGURATION_SCOPE_TYPE_SHARED", alert_configuration_id="example-shared")
+    per_user = {**copy.deepcopy(shared), "scope_type": "ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER",
+                "alert_configuration_id": "example-per-user", "quantity_threshold": "20",
+                "principal_overrides": [{"principal_id": 1, "override_threshold": "30"}]}
+    live["alert_configurations"].append(per_user)
+    exported = ast.literal_eval(lib.export_budgets(client(api)).split("BUDGETS = ", 1)[1])
+    assert len(exported[0]["alerts"]) == 2
+    assert exported[0]["alerts"][1]["principal_overrides"] == per_user["principal_overrides"]
+    desired = prepared(*exported)
+    assert lib.build_plan(client(api), desired, [budget_id])[0]["action"] == "no-op"
+    desired[0]["alerts"][1]["quantity_threshold"] = "25"
+    steps = lib.build_plan(client(api), desired, [budget_id])
+    assert lib.apply_plan(client(api), steps, apply=True)[0]["status"] == "ok"
+    assert len(api.budgets[budget_id]["alert_configurations"]) == 2
+
+
+@pytest.mark.parametrize("alerts", [[], "bad", [None], [{"quantity_threshold": "-1"}],
+    [{"quantity_threshold": "1", "scope_type": "unknown"}],
+    [{"quantity_threshold": "1", "action_configurations": [{"action_type": "UNKNOWN_ACTION"}]}],
+])
+def test_advanced_alert_validation(alerts):
+    assert lib.prepare([{"name": "example-alerts", "alerts": alerts}], workspace_id=101)[1]
+
+
+def test_blocking_actions_and_overrides_roundtrip():
+    entry = {"name": "example-gateway", "resource_type": lib.AI_RESOURCES, "alerts": [{
+        "quantity_threshold": "10", "scope_type": lib.PER_USER,
+        "action_configurations": [{"action_type": "BLOCK_USAGE", "notify_affected_user": False}],
+        "principal_overrides": [{"principal_id": 1, "override_threshold": "20"}],
+    }]}
+    api = FakeApi()
+    budget_id = api.add(entry)
+    exported = ast.literal_eval(lib.export_budgets(client(api)).split("BUDGETS = ", 1)[1])
+    assert lib.desired_body(prepared(*exported)[0]) == lib.desired_body(prepared(entry)[0])
+    assert lib.build_plan(client(api), prepared(*exported), [budget_id])[0]["action"] == "no-op"
+
+
+@pytest.mark.parametrize("scope", [lib.SHARED, lib.PER_USER])
+def test_advanced_report_thresholds(scope):
+    budget = prepared({"name": "example-alerts", "alerts": [{"quantity_threshold": "20", "scope_type": scope}]})[0]
+    if scope == lib.PER_USER:
+        with pytest.raises(ValueError, match="per-user"):
+            lib.report_query(budget, "2026-01-01", "2026-02-01", "example-account")
+    else:
+        _, parameters = lib.report_query(budget, "2026-01-01", "2026-02-01", "example-account")
+        assert parameters["budget_amount"] == "20"
+
+
+def test_gateway_report_refuses_to_present_all_product_spend_as_gateway_cost():
+    budget = prepared(declaration(resource_type=lib.AI_RESOURCES))[0]
+    with pytest.raises(ValueError, match="resource"):
+        lib.report_query(budget, "2026-01-01", "2026-02-01", "example-account")
+
+
+def test_workspace_create_uses_filter_not_read_only_resource_workspace_field():
+    api = FakeApi()
+    target = client(api)
+    steps = lib.build_plan(target, prepared(declaration()), [])
+    assert lib.apply_plan(target, steps, apply=True)[0]["status"] == "ok"
+    body = next(call[2]["budget"] for call in api.calls if call[0] == "POST")
+    assert "workspace_id" not in body
+    assert "product_type" not in body
+    assert "pricing_basis" not in body
+    assert "include_external_spend" not in body
+    assert body["filter"]["workspace_id"]["values"] == [101]
+
+
+def test_legacy_workspace_scoped_response_can_infer_scope_from_filter():
+    api = FakeApi()
+    budget_id = api.add()
+    api.budgets[budget_id].pop("workspace_id")
+    assert lib.declaration_from_live(api.budgets[budget_id])["workspace_id"] == 101
