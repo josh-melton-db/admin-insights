@@ -1,4 +1,12 @@
 # Databricks notebook source
+# MAGIC %pip install --upgrade databricks-sdk
+
+# COMMAND ----------
+
+# MAGIC %restart_python
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Account budgets as code
 # MAGIC Edit declarations, then run all. `apply=false` is GET-only for budget calls.
@@ -27,6 +35,8 @@ dbutils.widgets.dropdown("apply", "false", ["false", "true"])
 dbutils.widgets.dropdown("allow_deletes", "false", ["false", "true"])
 dbutils.widgets.text("account_id", "")
 dbutils.widgets.text("account_host", "https://accounts.cloud.databricks.com")
+dbutils.widgets.dropdown("account_auth", "interactive", ["interactive", "secret"])
+dbutils.widgets.text("account_signin_redirect", "")
 dbutils.widgets.text("account_token_secret_scope", "")
 dbutils.widgets.text("account_token_secret_key", "")
 dbutils.widgets.text("report_start_date", (dt.date.today() - dt.timedelta(days=30)).isoformat())
@@ -64,14 +74,61 @@ except ValueError:
     errors.append("Report dates must be YYYY-MM-DD with start before exclusive end")
 if errors:
     raise ValueError("Invalid declarations:\n" + "\n".join(f"  - {error}" for error in errors))
-client = lib.account_client(
-    in_runtime=IN_RUNTIME,
-    account_id=dbutils.widgets.get("account_id").strip(),
-    account_host=dbutils.widgets.get("account_host").strip(),
-    secret_scope=dbutils.widgets.get("account_token_secret_scope").strip(),
-    secret_key=dbutils.widgets.get("account_token_secret_key").strip(),
-    dbutils=dbutils,
-)
+AUTH_MODE = lib.account_auth_mode(IN_RUNTIME, dbutils.widgets.get("account_auth"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Account sign-in
+# MAGIC Run this cell to start/restart sign-in. Open the link and complete sign-in yourself.
+# MAGIC The browser will land on an expected **failed localhost page**; do not retry that page.
+# MAGIC Paste its full address (preferred, verifies returned state) or just its code into
+# MAGIC `account_signin_redirect`, then **run the next cell**, not this cell or Run all.
+# MAGIC Do not paste into notebook source or outputs. The widget is cleared on consumption;
+# MAGIC widget inputs may be retained by the platform, so never share the notebook while signing in.
+# MAGIC A code-only paste uses the pending consent state and PKCE; it cannot check returned state.
+
+# COMMAND ----------
+
+from html import escape
+
+client = None
+account_consent = None
+if AUTH_MODE == "interactive":
+    dbutils.widgets.text("account_signin_redirect", "")
+    account_consent = lib.initiate_account_signin(
+        dbutils.widgets.get("account_host").strip(), dbutils.widgets.get("account_id").strip()
+    )
+    displayHTML('<a target="_blank" rel="noopener noreferrer" href="' +
+                escape(account_consent.authorization_url, quote=True) + '">Sign in to the account</a>')
+    print("After sign-in, paste the failed localhost page's address into account_signin_redirect and run the next cell.")
+
+# COMMAND ----------
+
+if AUTH_MODE == "interactive" and (account_consent is None or not dbutils.widgets.get("account_signin_redirect").strip()):
+    dbutils.notebook.exit("Waiting for account sign-in: re-run the sign-in cell if needed, open the link, paste the redirected URL or code, then run this cell and continue.")
+try:
+    client = lib.account_client(
+        in_runtime=IN_RUNTIME,
+        account_auth=AUTH_MODE,
+        account_id=dbutils.widgets.get("account_id").strip(),
+        account_host=dbutils.widgets.get("account_host").strip(),
+        secret_scope=dbutils.widgets.get("account_token_secret_scope").strip(),
+        secret_key=dbutils.widgets.get("account_token_secret_key").strip(),
+        dbutils=dbutils,
+        session_credentials=(lib.exchange_account_signin(account_consent, dbutils.widgets.get("account_signin_redirect"))
+                             if AUTH_MODE == "interactive" else None),
+    )
+except (ValueError, lib.BudgetError):
+    if AUTH_MODE != "interactive":
+        raise
+    dbutils.notebook.exit("Account authentication failed (possibly stale/reused code or state mismatch). Re-run the sign-in cell and sign in again.")
+finally:
+    account_consent = None
+    if AUTH_MODE == "interactive":
+        dbutils.widgets.remove("account_signin_redirect")
+if client is None:
+    raise RuntimeError("Complete account authentication before continuing")
 print(f"Validated {len(declared)} budgets. Account credential configured; values suppressed.")
 
 # COMMAND ----------
