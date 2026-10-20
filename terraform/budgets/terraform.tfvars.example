@@ -1,0 +1,14 @@
+account_id      = "00000000-0000-0000-0000-000000000001"
+account_profile = "<CHOSEN_ACCOUNT_PROFILE>"
+
+budgets = {
+  example_team_monthly = {
+    name                = "example-team-monthly"
+    amount              = 100
+    time_period         = "MONTH"
+    quantity_type       = "LIST_PRICE_DOLLARS_USD"
+    notification_emails = []
+    tags                = { project = ["example-project"] }
+    workspace_id        = 1
+  }
+}
