@@ -18,8 +18,8 @@ variable "account_id" {
   type        = string
   nullable    = false
   validation {
-    condition     = length(trimspace(var.account_id)) > 0
-    error_message = "An explicit account ID is required."
+    condition     = can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.account_id))
+    error_message = "An explicit account ID in UUID format is required."
   }
 }
 
@@ -34,7 +34,7 @@ variable "account_profile" {
 }
 
 variable "budgets" {
-  description = "Budgets keyed by stable Terraform identity. Workspace scope requires workspace_id; account scope explicitly permits all spend or workspace_ids."
+  description = "Workspace-specific budgets keyed by stable Terraform identity. Every budget requires one positive integer workspace_id."
   type = map(object({
     name                = string
     amount              = number
@@ -42,9 +42,7 @@ variable "budgets" {
     quantity_type       = optional(string, "LIST_PRICE_DOLLARS_USD")
     notification_emails = optional(set(string), [])
     tags                = optional(map(set(string)), {})
-    scope               = optional(string, "workspace")
     workspace_id        = optional(number)
-    workspace_ids       = optional(set(number))
   }))
   default  = {}
   nullable = false
@@ -63,20 +61,9 @@ variable "budgets" {
   }
   validation {
     condition = alltrue([for budget in var.budgets : try(
-      budget.scope == "workspace" ? (
-        budget.workspace_id != null && budget.workspace_ids == null
-        ) : (
-        budget.scope == "account" && budget.workspace_id == null
-      ), false)
+      budget.workspace_id > 0 && budget.workspace_id <= 9223372036854775807 && floor(budget.workspace_id) == budget.workspace_id, false)
     ])
-    error_message = "Workspace scope requires workspace_id and forbids workspace_ids; explicit account scope forbids workspace_id and optionally accepts workspace_ids."
-  }
-  validation {
-    condition = alltrue([for budget in var.budgets : alltrue([
-      for workspace_id in(budget.workspace_id != null ? [budget.workspace_id] : (budget.workspace_ids != null ? tolist(budget.workspace_ids) : [])) :
-      try(workspace_id > 0 && workspace_id <= 9223372036854775807 && floor(workspace_id) == workspace_id, false)
-    ]) && (budget.workspace_ids == null ? true : length(budget.workspace_ids) > 0)])
-    error_message = "Workspace IDs must be positive int64 integers; workspace_ids cannot be empty."
+    error_message = "Every budget requires workspace_id: a positive int64 integer."
   }
   validation {
     condition = alltrue([for budget in var.budgets : alltrue([
