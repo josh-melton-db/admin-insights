@@ -26,24 +26,18 @@ resource "databricks_budget" "this" {
     }
   }
 
-  dynamic "filter" {
-    for_each = each.value.scope == "workspace" || each.value.workspace_ids != null || length(each.value.tags) > 0 ? [each.value] : []
-    content {
-      dynamic "workspace_id" {
-        for_each = each.value.scope == "workspace" || each.value.workspace_ids != null ? [each.value] : []
-        content {
+  filter {
+    workspace_id {
+      operator = "IN"
+      values   = [each.value.workspace_id]
+    }
+    dynamic "tags" {
+      for_each = each.value.tags
+      content {
+        key = tags.key
+        value {
           operator = "IN"
-          values   = each.value.scope == "workspace" ? [each.value.workspace_id] : tolist(each.value.workspace_ids)
-        }
-      }
-      dynamic "tags" {
-        for_each = each.value.tags
-        content {
-          key = tags.key
-          value {
-            operator = "IN"
-            values   = sort(tolist(tags.value))
-          }
+          values   = sort(tolist(tags.value))
         }
       }
     }

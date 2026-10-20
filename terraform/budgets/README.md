@@ -1,4 +1,4 @@
-# Account budgets with Terraform
+# Workspace budgets with Terraform
 
 Standalone alternative to `bundles/budgets/src/manage_budgets.py`. The Python
 deployer is unchanged. Terraform owns only resources in its state, never budgets
@@ -8,8 +8,16 @@ Budgets notify about spending; these all-resource budgets do not cap spending.
 ## Setup and use
 
 Requires Terraform >= 1.5 (>= 1.7 for the offline mock tests) and an authorized
-Databricks account profile. Choose the profile yourself; none is defaulted or
-discovered from a workspace. Account ID and profile are required inputs.
+Databricks CLI OAuth profile on the accounts host. An "account profile" describes
+the login host, **not an account-admin role**. A workspace admin can manage budgets
+for a single workspace they administer; no account-admin role is required. Choose
+the profile yourself; none is defaulted. Account ID and profile are required inputs.
+
+Discover the account ID using your explicitly chosen workspace profile:
+
+```sh
+databricks api get /.well-known/databricks-config --profile <WS_PROFILE> | jq -r .account_id
+```
 
 From the repository root, sign in interactively yourself:
 
@@ -18,10 +26,10 @@ databricks auth login --host <ACCOUNTS_HOST> --account-id <ACCOUNT_ID> --profile
 cp terraform/budgets/terraform.tfvars.example terraform/budgets/terraform.tfvars
 ```
 
-Replace both placeholders in the private tfvars file and replace the shipped
-`example-*` declaration before using it against your account. The example has
-**explicit account scope** filtered by an example project tag, no workspace IDs,
-and no notification recipients. Supply your intended recipients to receive email.
+Replace the synthetic account UUID, profile placeholder, workspace ID, and shipped
+`example-*` declaration in the private tfvars file before live use. The example
+has **exactly one synthetic workspace ID**, an example project tag, and no
+notification recipients. Supply your intended recipients to receive email.
 For a cloud other than AWS, set `account_host` to the appropriate HTTPS accounts
 host (Azure: `https://accounts.azuredatabricks.net`, GCP:
 `https://accounts.gcp.databricks.com`). AWS defaults to
@@ -50,11 +58,17 @@ resource address; preserve keys or use a Terraform `moved` block when renaming.
 | `time_period`, `quantity_type` | `MONTH`, `LIST_PRICE_DOLLARS_USD` (defaults and only supported values) |
 | `notification_emails` | Set of email recipients; default empty, so no email actions |
 | `tags` | Map of case-sensitive tag keys to nonempty sets of allowed values; `IN` filters |
-| `scope = "workspace"` | Default; requires a positive integer `workspace_id`; never discovers or infers one |
-| `scope = "account"` | Explicit account scope; optional nonempty `workspace_ids` narrows spend to those workspaces |
+| `workspace_id` | Required positive int64 integer identifying exactly one workspace you administer; never inferred |
 
-Workspace scope forbids `workspace_ids`; account scope forbids `workspace_id`.
-Whole-account spend requires explicit account scope with no workspace list.
+There are no `scope` or `workspace_ids` inputs. Terraform's typed-object conversion
+discards unknown attributes rather than rejecting them; remove those obsolete
+keys from callers. They cannot broaden a budget: missing or null `workspace_id`
+fails validation with a required-ID message. The field uses an optional type only
+to provide that custom validation error (and test it); it has no usable default.
+There is no module-level workspace default. Account-wide and multi-workspace
+budgets are out of scope; use `bundles/budgets/src/manage_budgets.py` or the
+Databricks budgets UI instead.
+
 Workspace IDs are written only to `filter.workspace_id.values`, not a top-level
 resource field. Tags combine with the workspace filter. Each budget has one shared
 monthly `CUMULATIVE_SPENDING_EXCEEDED` alert and one `EMAIL_NOTIFICATION` action
@@ -73,11 +87,19 @@ Source documentation for that exact version:
 <https://github.com/databricks/terraform-provider-databricks/blob/v1.138.0/docs/resources/budget.md>.
 The schema confirms nested `alert_configurations`, `action_configurations`,
 `filter.workspace_id`, and `filter.tags.value` blocks. The resource is account-only
-and the budget API is public preview. Commit `.terraform.lock.hcl` for reproducible
+and the budget API is public preview. Account-level provider routing is still
+required: accounts host, account ID, and the chosen CLI OAuth profile. There is
+no workspace-provider variant of `databricks_budget`.
+Commit `.terraform.lock.hcl` for reproducible
 provider selection; update it deliberately together with the pinned version and
 rerun the offline gates. `init` downloads plugins but does not access an account.
 
 ## Adopt existing budgets by ID
+
+Workspace admins receive Budget Manager rights only on budgets they created.
+Importing or adopting someone else's budget requires a granted budget role;
+workspace administration alone does not authorize it. Only adopt budgets already
+filtered to exactly one workspace you administer.
 
 Do not let both tools manage the same budget. Stop Python writes first. For each
 entry in Python's `MANAGED_BUDGET_IDS` (or another explicitly selected budget ID),
@@ -102,8 +124,12 @@ create before retrying after a failure. Never blindly repeat creates.
 
 ## Deletion, state, and safety differences
 
+Budget filters may be immutable after creation. Changing tags or the workspace
+may fail or require delete+recreate; do not assume an in-place update will work.
+Review the plan and API response, and arrange an explicit replacement if needed.
+
 Delete a managed budget by removing its map entry, reviewing plan, then applying.
-Deleting an account budget is irreversible (recreating it gives it a new ID).
+Deleting a budget is irreversible (recreating it gives it a new ID).
 An empty map can delete **all budgets already tracked in this state**, but cannot
 sweep unrelated budgets. Do not erase state to remove a declaration. Never run
 concurrent writers or share ownership with the Python deployer.
@@ -124,18 +150,22 @@ reporting path with explicitly chosen workspace/account profiles.
 
 ## Offline verification (no account access)
 
+| Capability | Terraform module | Python script / UI |
+| --- | --- | --- |
+| Workspace-specific budgets | Exactly one required workspace per budget | Supports workspace filters |
+| Account-wide / multi-workspace budgets | Not supported | Use these tools instead |
+| Ownership / adoption | Terraform state and ID import; granted budget role needed | Python managed-ID registry / UI budget roles |
+| Spend reporting | Not included | Python read-only `--report` |
+
 ```sh
 terraform -chdir=terraform/budgets fmt -check -recursive
 terraform -chdir=terraform/budgets init -backend=false
 terraform -chdir=terraform/budgets validate
 terraform -chdir=terraform/budgets test -filter=tests/budgets.tftest.hcl
-cp terraform/budgets/terraform.tfvars.example terraform/budgets/terraform.tfvars
-terraform -chdir=terraform/budgets validate
-terraform -chdir=terraform/budgets test -test-directory=example-tests
-rm terraform/budgets/terraform.tfvars
+terraform -chdir=terraform/budgets test -test-directory=example-tests -var-file=terraform.tfvars.example
 ```
 
-Only copy/remove the example if no private tfvars file exists. `validate` checks
+The explicit example var file avoids overwriting private tfvars. `validate` checks
 configuration, not variable values; the example mock plan exercises those too.
 Tests use Terraform's mock provider, `command = plan` only, synthetic numeric
 workspace fixtures, a reserved `.invalid` email, and no credentials or API calls.

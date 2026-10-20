@@ -1,8 +1,33 @@
 mock_provider "databricks" {}
 
+run "malformed_account_id_rejected" {
+  command = plan
+  variables {
+    account_id = "not-a-uuid"
+  }
+  expect_failures = [var.account_id]
+}
+
+run "null_workspace_rejected" {
+  command = plan
+  variables {
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = null } }
+  }
+  expect_failures = [var.budgets]
+}
+
+run "negative_workspace_rejected" {
+  command = plan
+  variables {
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = -1 } }
+  }
+  expect_failures = [var.budgets]
+}
+
 variables {
-  account_id      = "offline-test-only"
+  account_id      = "00000000-0000-0000-0000-000000000001"
   account_profile = "offline-test-only"
+  budgets         = {}
 }
 
 run "empty_default" {
@@ -24,27 +49,22 @@ run "scope_and_alert_mapping" {
         notification_emails = ["test@example.invalid"]
         tags                = { project = ["example-project"] }
       }
-      account = {
-        name   = "example-account"
-        amount = 200
-        scope  = "account"
-      }
-      selected_workspaces = {
-        name          = "example-selected-workspaces"
-        amount        = 300
-        scope         = "account"
-        workspace_ids = [1, 2]
+      untagged = {
+        name         = "example-untagged"
+        amount       = 200
+        workspace_id = 2
       }
     }
   }
   assert {
     condition = (
-      length(databricks_budget.this) == 3 &&
-      keys(output.budget_ids) == ["account", "selected_workspaces", "workspace"] &&
+      length(databricks_budget.this) == 2 &&
+      keys(output.budget_ids) == ["untagged", "workspace"] &&
+      length(databricks_budget.this["workspace"].filter[0].workspace_id) == 1 &&
       databricks_budget.this["workspace"].filter[0].workspace_id[0].values == tolist([1]) &&
       databricks_budget.this["workspace"].filter[0].workspace_id[0].operator == "IN" &&
-      length(databricks_budget.this["account"].filter) == 0 &&
-      databricks_budget.this["selected_workspaces"].filter[0].workspace_id[0].values == tolist([1, 2])
+      databricks_budget.this["untagged"].filter[0].workspace_id[0].operator == "IN" &&
+      databricks_budget.this["untagged"].filter[0].workspace_id[0].values == tolist([2])
     )
     error_message = "Scope must never silently broaden from workspace to account."
   }
@@ -73,10 +93,68 @@ run "missing_workspace_rejected" {
   expect_failures = [var.budgets]
 }
 
+run "legacy_attributes_cannot_broaden_scope" {
+  command = plan
+  variables {
+    budgets = {
+      legacy = {
+        name          = "example-legacy"
+        amount        = 1
+        workspace_id  = 1
+        scope         = "account"
+        workspace_ids = [1, 2]
+      }
+    }
+  }
+  assert {
+    condition = (
+      length(databricks_budget.this["legacy"].filter[0].workspace_id) == 1 &&
+      databricks_budget.this["legacy"].filter[0].workspace_id[0].operator == "IN" &&
+      databricks_budget.this["legacy"].filter[0].workspace_id[0].values == tolist([1])
+    )
+    error_message = "Unknown object attributes are discarded by Terraform and must never broaden scope."
+  }
+}
+
+run "legacy_account_without_workspace_rejected" {
+  command = plan
+  variables {
+    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", workspace_ids = [1, 2] } }
+  }
+  expect_failures = [var.budgets]
+}
+
+run "empty_name_rejected" {
+  command = plan
+  variables {
+    budgets = { invalid = { name = "", amount = 1, workspace_id = 1 } }
+  }
+  expect_failures = [var.budgets]
+}
+
+run "maximum_name_length_accepted" {
+  command = plan
+  variables {
+    budgets = { boundary = { name = join("", [for index in range(128) : "x"]), amount = 1, workspace_id = 1 } }
+  }
+  assert {
+    condition     = length(databricks_budget.this["boundary"].display_name) == 128
+    error_message = "Names of exactly 128 characters must remain supported."
+  }
+}
+
+run "oversized_workspace_rejected" {
+  command = plan
+  variables {
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 9223372036854775808 } }
+  }
+  expect_failures = [var.budgets]
+}
+
 run "invalid_amount_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 0, scope = "account" } }
+    budgets = { invalid = { name = "example-invalid", amount = 0, workspace_id = 1 } }
   }
   expect_failures = [var.budgets]
 }
@@ -89,26 +167,26 @@ run "empty_profile_rejected" {
   expect_failures = [var.account_profile]
 }
 
-run "account_scope_conflict_rejected" {
+run "blank_name_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", workspace_id = 1 } }
+    budgets = { invalid = { name = " ", amount = 1, workspace_id = 1 } }
   }
   expect_failures = [var.budgets]
 }
 
-run "workspace_scope_conflict_rejected" {
+run "long_name_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 1, workspace_ids = [1, 2] } }
+    budgets = { invalid = { name = join("", [for index in range(129) : "x"]), amount = 1, workspace_id = 1 } }
   }
   expect_failures = [var.budgets]
 }
 
-run "empty_workspace_list_rejected" {
+run "zero_workspace_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", workspace_ids = [] } }
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 0 } }
   }
   expect_failures = [var.budgets]
 }
@@ -124,7 +202,7 @@ run "fractional_workspace_rejected" {
 run "empty_tag_values_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", tags = { project = [] } } }
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 1, tags = { project = [] } } }
   }
   expect_failures = [var.budgets]
 }
@@ -132,7 +210,7 @@ run "empty_tag_values_rejected" {
 run "invalid_recipient_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", notification_emails = ["not-an-email"] } }
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 1, notification_emails = ["not-an-email"] } }
   }
   expect_failures = [var.budgets]
 }
@@ -140,7 +218,7 @@ run "invalid_recipient_rejected" {
 run "unsupported_period_rejected" {
   command = plan
   variables {
-    budgets = { invalid = { name = "example-invalid", amount = 1, scope = "account", time_period = "DAY" } }
+    budgets = { invalid = { name = "example-invalid", amount = 1, workspace_id = 1, time_period = "DAY" } }
   }
   expect_failures = [var.budgets]
 }
@@ -149,8 +227,8 @@ run "duplicate_names_rejected" {
   command = plan
   variables {
     budgets = {
-      first  = { name = "example-duplicate", amount = 1, scope = "account" }
-      second = { name = "example-duplicate", amount = 2, scope = "account" }
+      first  = { name = "example-duplicate", amount = 1, workspace_id = 1 }
+      second = { name = "example-duplicate", amount = 2, workspace_id = 1 }
     }
   }
   expect_failures = [var.budgets]
