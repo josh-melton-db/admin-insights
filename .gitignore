@@ -6,6 +6,8 @@ build/
 .env
 .databricks/
 .smoke-test/
+.foreman/
+.isaac/
 test-results/
 playwright-report/
 examples/
