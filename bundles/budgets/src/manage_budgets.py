@@ -17,6 +17,7 @@ import datetime as dt
 import shlex
 import sys
 import time
+from urllib.parse import urlparse
 
 import budgets_lib as lib
 from databricks.sdk import AccountClient, WorkspaceClient
@@ -38,11 +39,45 @@ def parser():
     return result
 
 
-def login_message(profile):
-    return ("Account profile unavailable, invalid, or unauthorized. Sign in with: "
-            "databricks auth login --host https://accounts.cloud.databricks.com "
-            f"--account-id <ACCOUNT_ID> --profile {shlex.quote(profile)} "
-            "(use your cloud's accounts host if different)")
+def discover_account_id(workspace):
+    try:
+        account_id = workspace.config.account_id
+        if isinstance(account_id, str) and lib.ID_RE.fullmatch(account_id):
+            return account_id
+    except Exception:
+        pass
+    try:
+        metadata = workspace.api_client.do("GET", "/.well-known/databricks-config")
+        account_id = metadata.get("account_id") if isinstance(metadata, dict) else None
+        if isinstance(account_id, str) and lib.ID_RE.fullmatch(account_id):
+            return account_id
+    except Exception:
+        pass
+    return None
+
+
+def login_message(profile, account_id=None, workspace=None, workspace_profile=None):
+    accounts_host = "https://accounts.cloud.databricks.com"
+    try:
+        hostname = urlparse(workspace.config.host).hostname or ""
+        for suffix, host in (
+            (".azuredatabricks.net", "https://accounts.azuredatabricks.net"),
+            (".gcp.databricks.com", "https://accounts.gcp.databricks.com"),
+        ):
+            if hostname.endswith(suffix):
+                accounts_host = host
+                break
+    except Exception:
+        pass
+    message = ("Account profile unavailable, invalid, or unauthorized. Sign in with: "
+               f"databricks auth login --host {accounts_host} "
+               f"--account-id {account_id or '<ACCOUNT_ID>'} --profile {shlex.quote(profile)} "
+               "(use your cloud's accounts host if different)")
+    if not account_id:
+        message += (". Discover the account ID with: "
+                    "databricks api get /.well-known/databricks-config "
+                    f"--profile {shlex.quote(workspace_profile) if workspace_profile else '<WS_PROFILE>'}")
+    return message
 
 
 def print_table(columns, rows):
@@ -91,6 +126,8 @@ def report(workspace, warehouse_id, declared, start_date, end_date, account_id):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    workspace = None
+    discovered_account_id = None
     if args.report and not args.warehouse_id:
         print("--report requires --warehouse-id", file=sys.stderr)
         return 1
@@ -98,10 +135,10 @@ def main(argv=None):
         print("--report requires --workspace-profile", file=sys.stderr)
         return 1
     try:
-        workspace = None
         workspace_id = args.workspace_id
         if args.workspace_profile:
             workspace = WorkspaceClient(profile=args.workspace_profile)
+            discovered_account_id = discover_account_id(workspace)
             if workspace_id is None:
                 workspace_id = int(workspace.get_workspace_id())
         declared, errors = lib.prepare(BUDGETS, workspace_id=workspace_id)
@@ -122,8 +159,13 @@ def main(argv=None):
             account = AccountClient(profile=args.account_profile)
             lib.validate_account_config(account.config)
         except Exception:
-            print(login_message(args.account_profile), file=sys.stderr)
+            print(login_message(args.account_profile, discovered_account_id, workspace, args.workspace_profile),
+                  file=sys.stderr)
             return 1
+        if discovered_account_id and account.config.account_id != discovered_account_id:
+            raise lib.BudgetError(
+                f"Account mismatch: account profile uses {account.config.account_id}; "
+                f"workspace profile uses {discovered_account_id}. Select profiles for the same account.")
         client = lib.Client(account, account.config.account_id)
         steps = lib.build_plan(client, declared, MANAGED_BUDGET_IDS)
         print(f"Validated {len(declared)} budgets.")
@@ -147,7 +189,8 @@ def main(argv=None):
             report(workspace, args.warehouse_id, declared, args.start_date, args.end_date, client.account_id)
         return 0
     except lib.BudgetAuthError:
-        print(login_message(args.account_profile), file=sys.stderr)
+        print(login_message(args.account_profile, discovered_account_id, workspace, args.workspace_profile),
+              file=sys.stderr)
         return 1
     except lib.BudgetError as error:
         print(str(error), file=sys.stderr)
