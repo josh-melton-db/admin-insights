@@ -2,7 +2,7 @@
 
 Run from the repository root with Python 3.10+. Account budget calls use an
 explicit Databricks CLI account profile; workspace credentials are used only to
-discover the default workspace scope and execute optional spend reports.
+discover the account ID and default workspace scope, and execute optional spend reports.
 
 ## Setup and run
 
@@ -18,6 +18,20 @@ python bundles/budgets/src/manage_budgets.py --account-profile <ACCT_PROFILE> --
 Use the accounts host for your cloud. A workspace profile cannot authenticate
 account budget requests. Authentication failures print a login command, never
 credentials or API error bodies. No pasted codes or platform secrets are needed.
+
+With `--workspace-profile`, the CLI discovers the account ID from the workspace
+SDK configuration (falling back to workspace metadata) and fills the login hint
+automatically, including the cloud's accounts host when known. To look it up manually:
+
+```bash
+databricks api get /.well-known/databricks-config --profile <WS_PROFILE> | jq -r .account_id
+```
+
+Discovery requires no account-admin rights and does not grant account access.
+If it fails, the CLI keeps the placeholder and prints the lookup command; an
+otherwise valid account profile still works. If the discovered ID differs from
+the account profile's ID, the CLI stops before any budget request. Workspace
+credentials are never reused for account budget requests.
 
 Edit `BUDGETS` and `MANAGED_BUDGET_IDS` at the top of
 `src/manage_budgets.py`. The shipped `example-*` declaration is plan-only:

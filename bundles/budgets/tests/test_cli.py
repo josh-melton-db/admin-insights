@@ -18,6 +18,7 @@ def setup_cli(monkeypatch):
     factory = Mock(return_value=account)
     monkeypatch.setattr(cli, "AccountClient", factory)
     workspace = Mock()
+    workspace.config = SimpleNamespace(account_id="example-account", host="https://workspace.cloud.databricks.com")
     workspace.get_workspace_id.return_value = 101
     monkeypatch.setattr(cli, "WorkspaceClient", Mock(return_value=workspace))
     monkeypatch.setattr(cli, "BUDGETS", [declaration(name="team")])
@@ -27,6 +28,89 @@ def setup_cli(monkeypatch):
 
 def run(*args):
     return cli.main(["--account-profile", "chosen", "--workspace-profile", "workspace", *args])
+
+
+@pytest.mark.parametrize("failure", ["missing", "workspace", "unauthorized"])
+def test_login_hint_discovers_account(setup_cli, capsys, failure):
+    from databricks.sdk.errors import PermissionDenied
+
+    api, account, factory, workspace = setup_cli
+    workspace.config.account_id = "05d08df7-ae03-43ad-bbae-14babb530ec0"
+    account.config.account_id = workspace.config.account_id
+    if failure == "missing":
+        factory.side_effect = RuntimeError("private-token")
+    elif failure == "workspace":
+        account.config.host = workspace.config.host
+    else:
+        api.do = Mock(side_effect=PermissionDenied("private-token"))
+    assert run() != 0
+    output = capsys.readouterr().err
+    assert f"--account-id {workspace.config.account_id}" in output
+    assert "<ACCOUNT_ID>" not in output and "private-token" not in output
+    workspace.api_client.do.assert_not_called()
+
+
+@pytest.mark.parametrize("response", [{}, {"account_id": "bad/id"}, None, "private-token"])
+def test_discovery_failure_keeps_placeholder_and_manual_command(setup_cli, capsys, response):
+    setup_cli[3].config.account_id = None
+    setup_cli[3].api_client.do.return_value = response
+    setup_cli[2].side_effect = RuntimeError("private-token")
+    assert run() != 0
+    output = capsys.readouterr().err
+    assert "--account-id <ACCOUNT_ID>" in output
+    assert "databricks api get /.well-known/databricks-config --profile workspace" in output
+    assert "private-token" not in output
+
+
+def test_discovery_falls_back_to_workspace_endpoint(setup_cli, capsys):
+    workspace = setup_cli[3]
+    workspace.config.account_id = None
+    workspace.api_client.do.return_value = {"account_id": "example-account"}
+    setup_cli[2].side_effect = RuntimeError("private-token")
+    assert run() != 0
+    assert "--account-id example-account" in capsys.readouterr().err
+    workspace.api_client.do.assert_called_once_with("GET", "/.well-known/databricks-config")
+
+
+def test_account_mismatch_blocks_all_budget_calls(setup_cli, capsys):
+    setup_cli[3].config.account_id = "different-account"
+    assert run("--apply") != 0
+    output = capsys.readouterr().err
+    assert "different-account" in output and "example-account" in output
+    assert not setup_cli[0].calls
+
+
+def test_matching_account_ids_proceed(setup_cli):
+    assert run() == 0
+    assert setup_cli[0].calls
+
+
+def test_discovery_endpoint_failure_is_nonfatal(setup_cli, capsys):
+    setup_cli[3].config.account_id = None
+    setup_cli[3].api_client.do.side_effect = RuntimeError("private-token")
+    assert run() == 0
+    assert "private-token" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host,accounts_host", [
+    ("https://workspace.azuredatabricks.net", "https://accounts.azuredatabricks.net"),
+    ("https://workspace.gcp.databricks.com", "https://accounts.gcp.databricks.com"),
+    ("https://workspace.cloud.databricks.com", "https://accounts.cloud.databricks.com"),
+])
+def test_login_hint_uses_workspace_cloud(setup_cli, capsys, host, accounts_host):
+    setup_cli[3].config.host = host
+    setup_cli[2].side_effect = RuntimeError("private-token")
+    assert run() != 0
+    assert f"--host {accounts_host}" in capsys.readouterr().err
+
+
+def test_login_without_workspace_keeps_manual_lookup_hint(setup_cli, capsys):
+    setup_cli[2].side_effect = RuntimeError("private-token")
+    assert cli.main(["--account-profile", "chosen", "--workspace-id", "101"]) != 0
+    output = capsys.readouterr().err
+    assert "--account-id <ACCOUNT_ID>" in output
+    assert "databricks api get /.well-known/databricks-config --profile <WS_PROFILE>" in output
+    cli.WorkspaceClient.assert_not_called()
 
 
 def test_default_plan_is_read_only(setup_cli):
