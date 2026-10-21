@@ -15,8 +15,24 @@ python bundles/budgets/src/manage_budgets.py --help
 python bundles/budgets/src/manage_budgets.py --account-profile <ACCT_PROFILE> --workspace-profile <WS_PROFILE>
 ```
 
-Use the accounts host for your cloud. A workspace profile cannot authenticate
-account budget requests. Authentication failures print a login command, never
+Use the accounts host for your cloud:
+
+| Cloud | Accounts host | Workspace host looks like |
+|---|---|---|
+| AWS | `https://accounts.cloud.databricks.com` | `https://<name>.cloud.databricks.com` |
+| Azure | `https://accounts.azuredatabricks.net` | `https://adb-<workspace-id>.<n>.azuredatabricks.net` |
+| GCP | `https://accounts.gcp.databricks.com` | `https://<id>.<n>.gcp.databricks.com` |
+
+For example, on Azure:
+
+```bash
+databricks auth login --host https://accounts.azuredatabricks.net --account-id <ACCOUNT_ID> --profile <ACCT_PROFILE>
+databricks auth login --host https://adb-<workspace-id>.<n>.azuredatabricks.net --profile <WS_PROFILE>
+```
+
+On Azure, the account profile must be an Entra ID user or service principal
+that is a Databricks account admin; Azure subscription Owner or workspace admin
+is not enough. A workspace profile cannot authenticate account budget requests. Authentication failures print a login command, never
 credentials or API error bodies. No pasted codes or platform secrets are needed.
 
 With `--workspace-profile`, the CLI discovers the account ID from the workspace
