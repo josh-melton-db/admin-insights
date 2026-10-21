@@ -41,6 +41,10 @@ run "example_mapping" {
     )
     error_message = "The notebook example must retain names, tags and workspace scope."
   }
+  assert {
+    condition     = length(databricks_access_control_rule_set.this) == 0
+    error_message = "Tags-only policies must leave the creator's grants untouched."
+  }
 }
 
 run "bindings_and_grants" {
@@ -49,7 +53,7 @@ run "bindings_and_grants" {
     required_tag_keys    = []
     default_workspace_id = null
     policies = {
-      all   = { name = "example-all", tags = {}, workspace_ids = "all" }
+      all   = { name = "example-all", tags = {}, workspace_ids = "all", users = [], managers = [] }
       empty = { name = "example-empty", tags = {}, workspace_ids = [] }
       explicit = {
         name          = "example-explicit"
@@ -74,7 +78,7 @@ run "bindings_and_grants" {
       tomap({ for grant in databricks_access_control_rule_set.this["explicit"].grant_rules : grant.role => grant.principals }) == tomap({
         "roles/budgetPolicy.user"    = toset(["servicePrincipals/example-app", "users/example-user"])
         "roles/budgetPolicy.manager" = toset(["groups/example-managers"])
-      }) && length(databricks_access_control_rule_set.this["all"].grant_rules) == 0
+      }) && toset(keys(databricks_access_control_rule_set.this)) == toset(["explicit"])
     )
     error_message = "Rule sets must use policy IDs and the authoritative User/Manager roles."
   }
@@ -88,7 +92,7 @@ run "limits_are_inclusive" {
       boundary = {
         name  = join("", [for index in range(127) : "x"])
         tags  = { for index in range(20) : "example-${index}" => join("", [for character in range(256) : "x"]) }
-        users = ["groups/example team"]
+        users = ["groups/example team", "groups/example/team"]
       }
     }
   }

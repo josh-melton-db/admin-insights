@@ -25,7 +25,7 @@ resource "databricks_budget_policy" "this" {
 }
 
 resource "databricks_access_control_rule_set" "this" {
-  for_each = local.policies
+  for_each = { for key, policy in local.policies : key => policy if length(policy.users) > 0 || length(policy.managers) > 0 }
 
   name = "accounts/${var.account_id}/budgetPolicies/${databricks_budget_policy.this[each.key].policy_id}/ruleSets/default"
   api  = "account"

@@ -77,7 +77,7 @@ variable "policies" {
     error_message = "Policy keys and names must be nonblank; names must be 1-127 characters."
   }
   validation {
-    condition     = length(distinct([for policy in var.policies : policy.name])) == length(var.policies)
+    condition     = try(length(distinct([for policy in var.policies : policy.name])) == length(var.policies), false)
     error_message = "Policy names must be unique."
   }
   validation {
@@ -85,7 +85,7 @@ variable "policies" {
       length(policy.tags) <= 20 &&
       length(distinct([for key in keys(policy.tags) : lower(key)])) == length(policy.tags) &&
       alltrue([for key, value in policy.tags : length(trimspace(key)) > 0 && length(value) <= 256 && !contains([
-        "budget-policy-name", "budget-policy-id", "budget-policy-resolution-result"
+        "budget-policy-name", "budget-policy-id", "budget-policy-resolution-result", "managed_by"
       ], lower(key))]), false)
     ])
     error_message = "Use at most 20 tags, nonblank case-insensitively unique nonreserved keys, and nonnull values of at most 256 characters."
@@ -97,10 +97,16 @@ variable "policies" {
     error_message = "Every policy must include nonempty values for all required_tag_keys."
   }
   validation {
-    condition = alltrue([for policy in var.policies : alltrue([
-      for principal in setunion(coalesce(try(policy.users, null), []), coalesce(try(policy.managers, null), [])) : can(regex("^(users|groups|servicePrincipals)/[^/]+$", principal))
-    ])])
+    condition = try(alltrue([for policy in var.policies : alltrue([
+      for principal in setunion(coalesce(try(policy.users, null), []), coalesce(try(policy.managers, null), [])) : can(regex("^(users|groups|servicePrincipals)/.+$", principal))
+    ])]), false)
     error_message = "Principals must match users/<name>, groups/<name>, or servicePrincipals/<applicationId>."
+  }
+  validation {
+    condition = try(alltrue([for policy in var.policies : try(policy.workspace_ids, null) == null || try(policy.workspace_ids == "all", false) ? true : (
+      length(distinct(policy.workspace_ids)) == length(policy.workspace_ids)
+    )]), false)
+    error_message = "workspace_ids must not contain duplicate IDs."
   }
   validation {
     condition = alltrue([for policy in var.policies : try(policy.workspace_ids, null) == null ? var.default_workspace_id != null : (

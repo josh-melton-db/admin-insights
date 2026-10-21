@@ -83,12 +83,15 @@ blocks when renaming keys.
 | `tags` | Required string map, at most 20 entries; values <=256 characters |
 | `workspace_ids` omitted/null | Use explicit `default_workspace_id`; fail validation if unavailable |
 | `workspace_ids = "all"` or `[]` | Every workspace in the account |
-| `workspace_ids = [1, 2]` | Explicit positive int64 workspace IDs |
+| `workspace_ids = [1, 2]` | Explicit distinct positive int64 workspace IDs, listed ascending |
 | `users`, `managers` | Optional principal collections, default empty; `users/…`, `groups/…`, `servicePrincipals/…` |
 
 The account provider has no current workspace to discover. This module requires
 an explicit fallback workspace when bindings are omitted, rather than silently
 turning a workspace-scoped declaration into account-wide access.
+List workspace IDs in ascending numeric order. Duplicates are rejected; the
+module preserves the supplied order rather than using Terraform's string-based
+`sort()`, which would place 10 before 2.
 `required_tag_keys` defaults to `cost_center`, `project`, `owner`; each must have
 a nonempty value. Reserved budget-policy keys and case-insensitive duplicate tag
 keys are rejected. Names must also meet the API's Latin-1 and reserved-prefix
@@ -103,18 +106,25 @@ uses `any` with structural/field validations plus normalization, intentionally
 preserving the notebook's mixed binding syntax. Unknown policy fields are
 rejected instead of being silently discarded by typed-object conversion.
 
-The notebook's `managed_by=usage-policies-notebook` tag is **not** inserted:
+The notebook's marker key `managed_by` is rejected and **not** inserted:
 Terraform state is the ownership registry. Do not add that marker to new policies
 or manage the same policy from both tools. Imported notebook policies need to be
 removed from notebook management before Terraform owns them.
 
 ### Grants are authoritative; prevent lockout
 
-Each policy gets exactly one rule set at
+Only policies with at least one declared User or Manager principal get a rule set at
 `accounts/<account_id>/budgetPolicies/<policy_id>/ruleSets/default` with
 `roles/budgetPolicy.user` and `roles/budgetPolicy.manager` rules.
 **Grants REPLACE all rules on that rule set**, including undeclared roles or
-principals; empty lists remove that role and two empty lists clear all rules.
+principals; an empty list removes that role when the other role is nonempty.
+When both lists are empty or omitted, no rule-set resource is created: a new
+tags-only policy retains the creator's default access, and existing unmanaged
+grants are left untouched.
+If Terraform already manages a rule set, changing both lists to empty removes
+that resource and its destruction clears grants. To stop managing such grants
+without clearing them, first relinquish the rule set with a Terraform `removed`
+block using `destroy = false`; review that state handoff separately.
 Importing does not preserve undeclared grants on subsequent apply.
 Unlike the notebook, Terraform does not automatically retain the caller's direct
 Manager grant or unrelated roles. Explicitly retain the applying principal (or
@@ -125,7 +135,9 @@ uses a synthetic manager group; replace it with an authorized real group locally
 ## Adopt existing policies
 
 First declare the existing name, all intended tags, bindings and grants under a
-stable key. Then add temporary import blocks (synthetic placeholders shown):
+stable key. Import the rule set only when the declaration has at least one User
+or Manager principal; a tags-only declaration imports only the policy. Add the
+appropriate temporary import blocks (synthetic placeholders shown):
 
 ```hcl
 import {
@@ -146,8 +158,8 @@ notebook marker during the handoff, disable notebook writes for these policies,
 and do not run both managers concurrently.
 
 Deletion is intentional: remove the entry from `policies`, review the destroy
-plan, then apply. Terraform removes its rule set before deleting the policy;
-rule-set destruction clears grants. An empty map destroys previously managed
+plan, then apply. Terraform removes its managed rule set, if present, before
+deleting the policy; rule-set destruction clears grants. An empty map destroys previously managed
 policies, while it creates nothing in a fresh state. The notebook's
 `allow_deletes` switch is replaced by Terraform's reviewed plan and confirmation.
 

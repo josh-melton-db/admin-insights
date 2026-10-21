@@ -1,5 +1,45 @@
 mock_provider "databricks" {}
 
+run "duplicate_workspace_rejected" {
+  command = plan
+  variables {
+    policies = { invalid = { name = "example-invalid", tags = {}, workspace_ids = [1, 1] } }
+  }
+  expect_failures = [var.policies]
+}
+
+run "notebook_marker_rejected" {
+  command = plan
+  variables {
+    policies = { invalid = { name = "example-invalid", tags = { managed_by = "usage-policies-notebook" } } }
+  }
+  expect_failures = [var.policies]
+}
+
+run "null_policy_rejected" {
+  command = plan
+  variables {
+    policies = { invalid = null }
+  }
+  expect_failures = [var.policies]
+}
+
+run "string_users_rejected" {
+  command = plan
+  variables {
+    policies = { invalid = { name = "example-invalid", tags = {}, users = "users/example-user" } }
+  }
+  expect_failures = [var.policies]
+}
+
+run "string_managers_rejected" {
+  command = plan
+  variables {
+    policies = { invalid = { name = "example-invalid", tags = {}, managers = "groups/example-managers" } }
+  }
+  expect_failures = [var.policies]
+}
+
 variables {
   account_id           = "00000000-0000-0000-0000-000000000001"
   account_profile      = "example-offline-only"
