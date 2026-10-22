@@ -1,0 +1,19 @@
+account_id           = "00000000-0000-0000-0000-000000000001"
+account_profile      = "example-chosen-account-profile"
+default_workspace_id = 1
+
+policies = {
+  example_data_eng_project = {
+    name     = "example-data-eng-project"
+    tags     = { cost_center = "CC-0000-EXAMPLE", project = "example-ingest", owner = "example-team" }
+    users    = []
+    managers = ["groups/example-policy-managers"]
+  }
+  example_ml_research = {
+    name          = "example-ml-research"
+    tags          = { cost_center = "CC-9999-EXAMPLE", project = "example-forecasting", owner = "example-ml-team" }
+    workspace_ids = [1, 2]
+    users         = ["groups/example-ml-users"]
+    managers      = ["groups/example-policy-managers"]
+  }
+}
